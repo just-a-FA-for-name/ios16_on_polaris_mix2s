@@ -486,3 +486,15 @@ What it took today (in order): 0058 HID services (Apple IOHIDFamily-1915 user cl
      cpu_init, before arm_vm_init.
   5. panic hook at top of panic_trap_to_debugger: va_copy + _doprnt(fmt, &copy, sweet_early_putc, 16).
   Verify with tools/xnu-cc.py (compile+symbols) and patch-order simulation before the single CI run.
+
+## 2026-11-04 local MIX2S experiment: confirmed interactive UI
+
+Independent local toy-device experiment; latest state supersedes prior untested local steps.
+The owner's log boot-001 shows a running four-core XNU and SpringBoard waiting for LaunchServices reseeding (symbolicated shared-cache frames include LAUNCH_SERVICES_IS_RESEEDING_ITS_DATABASE_AND_MAY_BLOCK).
+A temporary image retained kernel 0090, CPUs=4 and the installed root, added exactly three locally administered MAC properties under /chosen plus lsd/datamigrator sampler names. Payload otherwise unchanged; unpack comparison passed.
+Image out/shim-polaris-ls-macs.img SHA256 f2415f33f17b0fb7470c643668d401e30254c26c938c06c54ea5fbf07b501de1.
+Owner confirmed lock screen, notification shade, home screen, Settings, return navigation and swiping. Home screen is extremely slow and wallpaper black; Settings less slow. This is actual owner observation, not a screenshot inference. Cause attribution to the MAC properties alone is not proven because initial migration also persisted between boots.
+No GPU acceleration or Wi-Fi is working. Existing kernel uses four A55 cores; do not call full eight-core support validated.
+Prepared CPU5 image: same ADT/kernel, exactly one payload byte changed from cpus=4 to cpus=5, validated prefix and size, independently unpacked. SHA256 640d1278f78819b2e83a58ee84d863ab575c3db821c912c4a511a10ac9648165. Not yet booted at this entry.
+Current phone: interactive iOS4-core pending owner's fastboot reset; first collect this successful boot's ring through temporary TWRP, then test CPU5 and inspect CPU4 PSCI/init/SGI and userspace before moving to CPU6/8.
+All images/backups/private logs remain on F drive. No firmware/bootloader/calibration partition writes; no public source upload or CI dispatch.
