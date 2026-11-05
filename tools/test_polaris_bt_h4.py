@@ -166,6 +166,16 @@ class PolarisBluetoothH4Tests(unittest.TestCase):
             C.byref(self.decoder), C.byref(self.sink), source, 1, alias), -1)
         self.assertEqual(bytes(self.decoder), before)
 
+    def test_standalone_address_and_undefined_sanitized_fuzz(self):
+        binary = Path(self.temp.name) / 'fuzz'
+        subprocess.run(['cc', '-std=c11', '-Wall', '-Wextra', '-Werror',
+                        '-fsanitize=address,undefined', '-fno-sanitize-recover=all',
+                        '-I', str(ROOT / 'userland'),
+                        str(ROOT / 'tools/polaris_bt_h4_fuzz.c'),
+                        str(ROOT / 'userland/polaris_bt_h4.c'), '-o', str(binary)], check=True)
+        result = subprocess.run([str(binary)], capture_output=True, text=True, check=True, timeout=60)
+        self.assertIn('50000 H4 stream and command trials passed', result.stdout)
+
 
 if __name__ == '__main__':
     unittest.main()
