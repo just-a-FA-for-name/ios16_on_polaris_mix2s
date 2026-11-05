@@ -1,5 +1,15 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## 2026-11-06 00:09 offline cache repair ready; per-process memory kill identified
+
+Added tools/prepare_poster_launchd_cache.py with8 regressions. It accepts ONLY the exact fixed maintenance job, preserves original bytes in a separate new output directory, rejects path/label conflicts, unexpected arguments/privileges/restart behavior and oversized/invalid inputs; canonical typed comparison rejects integer1 masquerading as booleanTrue. Exact existing job is byte-idempotent. Round-trip proof preserves all unrelated cache content including _PanicOnCrash. CLI refuses existing output directory instead of overwriting. All86 tests pass;84-test UBSan pass was before the last2 CLI-only tests; repository validation101 patches/47 Python/7 shell passed.
+
+Actual private boot020 cache prepared OFFLINE at ../device-private/poster-maintenance-cache-prepared/: original795217B SHA7b41fa308304021a90fb8dfc4ac6224e6c1841fb73e47b7f09efbdd7167c91d1; prepared795458B SHAd6d38ba99dd434a912c0dacd050043f2f22234309eb1b5c120837c3d9dc32a53. Jobs530->531; all421 extensions preserved. Manifest and byte-exact original backup present. NOT installed; no live cache replacement authorized while owner asleep. This is preparation, not verified launchd execution or successful wallpaper registration.
+
+Resolved driverkitd reason codes from ACTUAL prior CI XNU headers in out/ci-42016457313/buildtree.tgz: bsd/sys/reason.h OS_REASON_JETSAM=1 (CODESIGNING=3), kern_memorystatus.h JETSAM_REASON_MEMORY_PERPROCESSLIMIT=7. Thus observed namespace1/code7 is a per-process memory-limit kill, NOT a signature rejection; does not prove total RAM exhausted or explain every UI stall. Need inspect actual daemon footprint/limit before any scoped change, never disable global limits speculatively. No matching driverkitd/Jetsam report surfaced in the first CrashReporter directory listing.
+
+Boot020 also shows15 execs each of bluetoothd and fairplayd.H2; repeated starts, not proof of15 crashes. MobileSlideShow DID exec once despite user's inability to use apps, so do not claim no other app starts. Only one startup sample each of SpringBoard/backboardd/lsd, none for Preferences/installd; existing0054 sampler starts90s then120s intervals, missing most of this short interaction window. No new sampler or GPU code implemented yet.
+
 ## CURRENT 23:54: boot020 collected; owner asleep; maintenance job absent from boot cache
 
 User tested boot020: STILL no selectable wallpaper, severe lag, and says apparently only Settings opens. They returned to fastboot, then said they are going to sleep and to keep fixing things and remember PC shutdown. Do NOT request more interaction or initiate unapproved persistent-file replacements. Phone NOW BACK IN TWRP via verified recovery.img temporary boot (Sending/Booting OKAY); no permanent partitions flashed. Keep it there for unattended read-only investigation.
