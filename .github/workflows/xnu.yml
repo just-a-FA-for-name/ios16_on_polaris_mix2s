@@ -7,7 +7,7 @@ on:
         description: macOS release whose xnu to build (13.5 = xnu-8796, iOS 16 era)
         default: "13.5"
       kernel_config:
-        description: RELEASE / DEVELOPMENT / DEBUG
+        description: RELEASE / DEVELOPMENT / DEBUG / PREVIEW_ONLY / DRIVER_FOUNDATIONS
         default: DEVELOPMENT
       machine_config:
         description: xnu MACHINE_CONFIG
@@ -34,7 +34,7 @@ env:
 
 jobs:
   build:
-    if: ${{ inputs.kernel_config != 'PREVIEW_ONLY' }}
+    if: ${{ inputs.kernel_config != 'PREVIEW_ONLY' && inputs.kernel_config != 'DRIVER_FOUNDATIONS' }}
     # macos-14 was retired on 2026-11-02. Use Intel macOS 15 and select its
     # oldest Xcode below; 0095 adds the IORPC.kernelContent ABI used by Xcode 16 iig.
     runs-on: macos-15-intel
@@ -123,6 +123,37 @@ jobs:
           name: xnu-kernel
           path: out/
           if-no-files-found: warn
+
+  driver-foundations:
+    if: ${{ inputs.kernel_config == 'DRIVER_FOUNDATIONS' }}
+    runs-on: macos-15-intel
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test native protocol and loader implementations
+        run: python3 -m unittest discover -s tools -p 'test_*.py' -v
+      - name: Compile and link iOS16 arm64 foundation library
+        run: |
+          XC=$(ls -d /Applications/Xcode_*.app | sort -V | head -1)
+          export DEVELOPER_DIR="$XC/Contents/Developer"
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          mkdir -p foundations-out
+          xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 \
+            -isysroot "$SDK" -std=c11 -Wall -Wextra -Werror -dynamiclib \
+            userland/polaris_hfi.c userland/polaris_mdt.c \
+            -Wl,-install_name,/usr/local/lib/libPolarisBringup.dylib \
+            -o foundations-out/libPolarisBringup.dylib
+          codesign --force --sign - foundations-out/libPolarisBringup.dylib
+          codesign --verify --strict foundations-out/libPolarisBringup.dylib
+          file foundations-out/libPolarisBringup.dylib
+          otool -L foundations-out/libPolarisBringup.dylib
+          nm -gU foundations-out/libPolarisBringup.dylib
+          (cd foundations-out && shasum -a 256 libPolarisBringup.dylib > SHA256SUMS)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: polaris-driver-foundations
+          path: foundations-out/
+          retention-days: 7
 
   preview-compat:
     if: ${{ inputs.kernel_config == 'PREVIEW_ONLY' }}
