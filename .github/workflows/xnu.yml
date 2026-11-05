@@ -140,7 +140,7 @@ jobs:
             -isysroot "$SDK" -fobjc-arc -fblocks -dynamiclib \
             -Werror=implicit-function-declaration -Wno-deprecated-declarations \
             userland/PolarisPreviewCompat.m -o preview-out/PolarisPreviewCompat.dylib \
-            -framework Foundation -framework UIKit -framework QuartzCore -framework Metal \
+            -framework Foundation -framework UIKit -framework QuartzCore -framework CoreGraphics -framework Metal \
             -Wl,-install_name,@executable_path/PolarisPreviewCompat.dylib
           codesign --force --sign - preview-out/PolarisPreviewCompat.dylib
           codesign --verify --strict preview-out/PolarisPreviewCompat.dylib
