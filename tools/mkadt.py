@@ -19,10 +19,16 @@ MEM_SIZE = 0x4d000000
 # carve-out is in the low bank and the dynamic pools are limited below 4G.
 HIGH_PHYS_BASE = 0x100000000
 HIGH_MEM_SIZE = 0xfcc00000
-# polaris (Mi MIX 2S, SDM845): same upper bank, but the installed RAM is 6 or
-# 8GB. 6GB ends at 0x1_80000000 and leaves at most 0x7cc00000 after the top
-# reservation, which is safe on both variants; --ram 8 uses the 8GB end.
-POLARIS_HIGH_MEM_SIZE = 0x7cc00000
+# Polaris DDR starts at PA 0x80000000: 6 GiB of installed RAM does NOT end
+# at PA 6 GiB. This phone's live FDT banks are [0x80000000,0x140000000)
+# and [0x140000000,0x1fd4a0000), and recovery Linux reports the high range
+# continuously as System RAM. The conservative end 0x1fcc00000 leaves the
+# top carve-out untouched; all fixed live-FDT reservations are below 4 GiB.
+# Previously subtracting the absolute 4-GiB base from the RAM CAPACITY
+# advertised only 0x7cc00000 (~2 GiB), unnecessarily halving usable memory.
+POLARIS_HIGH_MEM_SIZE = 0xfcc00000
+# Keep the already supported conservative window on 8-GiB variants too;
+# extending past this validated end requires that device's own live map.
 POLARIS_HIGH_MEM_SIZE_8 = 0xfcc00000
 # /arm-io children are relative to this; it must not be 0 (serial_init bails)
 SOC_BASE = 0x01000000
