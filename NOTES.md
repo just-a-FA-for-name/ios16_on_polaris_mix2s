@@ -607,3 +607,42 @@ Owner adds only10% of five-hour allowance remains; prioritize completing install
 Built install and restore BEFORE phone use; both18382848B, independent unpack and reserved-blob exact bytes/range checks pass. Payloads differ at exactly one command-line byte polarispreview1 vs2, same kernel/memory/geometry/keys. INSTALL out/preview-42016457313-mode1/shim-polaris-preview-mode1.img SHA25632978a04bef0962070708dded761df5535948803ebd3b0fe1089dbeca30b03b6. RESTORE out/preview-42016457313-mode2/shim-polaris-preview-mode2.img SHA256f0590790aba8fcd95d4267127f7f984cbdb9455eb7b1f5d116d6271dc907db56. Original/patched/library blob data and16KiB alignment verified in preview-preflight.json; use first compiled library CI42015390696/833c94aa, not the later queued optional capability-cache build42017828112.
 CURRENT PHONE: temporary INSTALL image accepted fastboot Sending/Booting OKAY. This starts optional VFS installation during normal root startup; actual installed state and userland fallback result have NOT yet been read back. Ask owner (after return) whether desktop boots, volume-up works and Settings>Wallpaper now has previews/choices; then return fastboot for TWRP verification boot-015-preview-install and cache log. Do NOT claim wallpaper fixed or installation complete solely from fastbootOKAY. If needed use prepared RESTORE image and verify POLARIS PREVIEW restore original result0.
 After successful runtime verification, finish normal-boot installation with a blob-free/default-off installer image using the same kernel, validated extended RAM/full geometry/60 target/GPIO6. Verify original boot backup again before flashing boot; preserve recovery/modem/persist and all backups. No further CI is needed to package that image. GPU/Wi-Fi remain unimplemented; user-visible fluency still only partially improved.
+
+## 2026-11-05 最终交接（本节覆盖前文旧状态）
+
+用户要求本轮只检查和交接，不再追加编译/刷写；禁止子 Agent。当前手机是临时启动的 TWRP，ADB recovery 可见。boot 分区仍是原 HyperOS，userdata 已是 iOS HFS 根，不可直接正常启动 Android，也不要格式化 data。全部大文件在 F 盘；不要占用 SSD，不要动 GPT/bootloader/modem/persist/recovery。原分区备份在 backup-20261104；没有完整原 Android system/data 备份。
+
+### 实机结果及本次真实进展
+- 最新临时镜像能进桌面，用户确认音量上键终于有反应。boot-015 日志有三组 key=1 down/up，gpio6=0/1，GPIO6 修正有效。
+- 内存从原先约2GiB修至约4GiB，再验证扩展至约5.2GiB；用户确认启动明显更快，滑动基本跟手，但整体仍明显卡顿，未达到可用标准。boot-015 有337269个空闲16KiB页，说明扩展内存确实生效。
+- 0098拆分刷新通知/拷屏工作循环，目标60Hz，用户确认比30Hz版更跟手；不能把目标/软件通知频率写成实际屏幕60FPS。仍无真正GPU/Metal加速驱动。
+- 墙纸仍黑，设置没有预览或可选墙纸。本轮并未修好。Wi-Fi驱动仍未完成，不能承诺联网。
+
+### 最后一次检查发现的明确阻塞（优先处理）
+已保存 device-private/logs/boot-015-preview-install.txt，454307字节，flush23。
+内核日志确认 POLARIS PREVIEW installed scoped library 87808 bytes and program 119520 bytes; original backup verified。
+从手机只读提取并校验三个文件，全部与预期完全一致：
+- PosterBoard.final（当前已改主程序）119520B，SHA256 bf54d4076c40ec4e4c528f689c01f9668c5a6a73e8785677fc02e282c3970248
+- Preview.final（已装库）87808B，SHA256 833c94aa9f187b7cc8ab9f30f174a99318bf6a5670c5494f79284cf79e825617
+- PosterBoard.original.final（设备内原程序备份）119520B，SHA256 644656cf6f6da07dc8a42b49f95b188aa1973a7d5a1fd12f5c1e8d40cea315be
+因此安装成功不等于兼容代码成功运行！新日志反复明确报：
+Library not loaded: @executable_path/PolarisPreviewCompat.dylib
+security policy does not allow @ path expansion
+PosterBoard 在 dyld 加载阶段 SIGABRT，不是进入原先 Metal 方法后崩溃。对应应用 Library/Caches 目录为空，没有 PolarisPreviewCompat.log。当前兼容库没有得到运行验收，不可判定 CPU fallback 本身无效。当前根已保留这一加载失败的主程序，尚未回退；反复重启服务可能增加负担，但其对整体卡顿的贡献未测量。
+
+### 下一位建议顺序
+1. 先阅读 polaris/AGENTS.md、NOTES.md 和本节；枚举设备确认 recovery，不要再让用户重复已完成的按键测试。
+2. 优先处理本轮新增的 dyld 加载失败。已有恢复镜像可先恢复原 PosterBoard，阻止新增加载失败循环；或者在严格验证后修复加载路径。绝对路径 /Applications/PosterBoard.app/PolarisPreviewCompat.dylib 是待验证方案，尚未实现，不能承诺安全策略一定接受；不要全局关闭加载安全检查。
+3. 如果改 load command，注意路径长度、cmdsize、ncmds/sizeofcmds、header padding 和 CodeDirectory 重哈希；原 helper 及内核安装器只接受既有精确程序字节。新程序必须同步更新保留 blob 与安装器预期/可恢复识别，不能盲目覆盖当前文件或原备份。签名仅适用现有定制 XNU 根平台策略，并非 Apple CMS 签名。
+4. 库加载成功后，先检查 Library/Caches/PolarisPreviewCompat.log 是否出现构造器/CPU preview/异常记录，再测试设置墙纸。CALayer CPU 渲染不保证能渲染所有远程/Metal 图层，也不等于 GPU 适配。
+5. 性能继续做分段测量及真实驱动适配，保留约5.2GiB、完整画面/触摸/全部按键；不要重新尝试裁切、10Hz、减少CPU等已失败路线。原始拷屏单次约11ms，单独解释不了约2秒点击等待。避免把采样swap或软件vsync说成端到端延迟/物理FPS。
+6. GPU/Metal和Wi-Fi都需要真实驱动工作，当前没有可运行实现。Wi-Fi资料/隔离草稿不等于驱动。先把本轮新增启动崩溃处理好再扩展范围。
+7. 继续临时 fastboot boot 验证；当前没有做永久 boot 安装。稳定、功能经用户验收后，才讨论并落实合适的默认关闭安装器、无大blob启动镜像；不要直接将安装模式镜像长期刷入 boot。
+
+### 本次精确产物及恢复路线
+仓库 polaris，当前分支 polaris-keys-0094。关键提交：0098=4bb7d33，内存01c28c5，GPIO6=a197ea6，兼容库f261b9a，0100安装器4f20e85，后续能力缓存ae93fb5未装入手机。
+当前使用内核CI42016457313：12285448B，SHA256 2f3c52afc15d5d58ed44beaaffc2fcd777135890b71d87324c50102d0a62f984。
+安装镜像 polaris/out/preview-42016457313-mode1/shim-polaris-preview-mode1.img，18382848B，SHA256 32978a04bef0962070708dded761df5535948803ebd3b0fe1089dbeca30b03b6。
+恢复镜像 polaris/out/preview-42016457313-mode2/shim-polaris-preview-mode2.img，18382848B，SHA256 f0590790aba8fcd95d4267127f7f984cbdb9455eb7b1f5d116d6271dc907db56。
+mode2临时启动时恢复原 PosterBoard，保留无引用的库；它有相同扩展内存、完整画面、60Hz目标和GPIO6修正。恢复后仍需取日志确认 restore result 和原文件SHA，不可只看 fastboot OKAY。不要在TWRP对HFS作原始块写入。
+工具：D:/AI workspace/android-tools/platform-tools/{adb,fastboot}.exe；serial 7f9594af。TWRP临时镜像 backup-20261104/recovery.img。读日志 wifi-port/pull_ios_log.py，TWRP等待使用 adb wait-for-recovery。HFS只读工具 tools/hfs-readonly/hfs-readonly-arm64 已推 /tmp/hfs-readonly，重启后需重推。Apple原文件、日志、签名补丁产物只留 device-private，禁止入git或上传。
