@@ -86,7 +86,7 @@ void PolarisPosterDiagnostics(void (*logger)(NSString *))
                         NSUInteger total = 0, posters = 0;
                         for (LSApplicationExtensionRecord *record in [recordClass enumeratorWithOptions:0]) {
                             if (++total > 2048) break;
-                            if ([record.extensionPointRecord.identifier isEqualToString:point]) {
+                            if ([[record.extensionPointRecord identifier] isEqualToString:point]) {
                                 if (++posters <= 32) {
                                     logger([NSString stringWithFormat:@"Registered poster provider: %@",
                                         record.bundleIdentifier]);
