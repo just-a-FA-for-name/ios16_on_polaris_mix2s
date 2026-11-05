@@ -1,0 +1,79 @@
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -334,7 +334,10 @@
+ 	memcpy(fPending, rec, SWEET_FB_SWAP_REC_SIZE);
+ 	fDirty = true;
+ 	IOLockUnlock(fLock);
+-	if ((++sweet_fb_swap_count % 1000) == 0) {
++	if ((++sweet_fb_swap_count % 60) == 0) {
++		IOLog("SWEET LAT: swap %u ts %llu\n", get32(rec, 0x50), mach_absolute_time());
++	}
++	if ((sweet_fb_swap_count % 1000) == 0) {
+ 		IOLog("SWEET FB: %llu swaps\n", sweet_fb_swap_count);
+ 	}
+ }
+@@ -401,6 +404,9 @@
+ AppleCLCD::present(const uint8_t *rec)
+ {
+ 	uint32_t mask = get32(rec, 0x104);
++	uint64_t started = mach_absolute_time();
++	uint32_t formats = 0;
++	uint64_t pixels = 0;
+ 
+ 
+ 	if (!fConsolePaused) {
+@@ -450,7 +456,16 @@
+ 		    s->pixelFormat == SWEET_FB_FORMAT_LA08;
+ 		if (!supported) {
+ 			sweet_fb_unknown_format(s->pixelFormat, s->planeCount, src_bpe);
++			formats |= 0x80000000u;
+ 			src = 0;
++		} else if (s->pixelFormat == SWEET_FB_FORMAT_BGRA) {
++			formats |= 1u;
++		} else if (s->pixelFormat == SWEET_FB_FORMAT_RGB10_WG) {
++			formats |= 2u;
++		} else if (s->pixelFormat == SWEET_FB_FORMAT_RGB10_ALPHA) {
++			formats |= 4u;
++		} else if (s->pixelFormat == SWEET_FB_FORMAT_LA08) {
++			formats |= 8u;
+ 		}
+ 		if (w <= 0 || h <= 0) {
+ 			w = (int32_t)s->width;
+@@ -532,6 +547,9 @@
+ 					src = 0;
+ 				}
+ 			}
++		}
++		if (src != 0) {
++			pixels += (uint64_t)w * (uint64_t)h;
+ 		}
+ 		if (src != 0 && s->pixelFormat != SWEET_FB_FORMAT_BGRA && fScale) {
+ 			int32_t px0 = fOffX + (int32_t)(((int64_t)dx * fContentW) / fLogicalW);
+@@ -624,6 +642,14 @@
+ 		}
+ 		s->release();
+ 	}
++	uint64_t elapsed_ns = 0;
++	absolutetime_to_nanoseconds(mach_absolute_time() - started, &elapsed_ns);
++	static uint64_t sequence;
++	sequence++;
++	if (elapsed_ns >= 1000000 || (sequence % 60) == 0) {
++		IOLog("SWEET LAT: present %llu us formats 0x%x pixels %llu\n",
++		    elapsed_ns / 1000, formats, pixels);
++	}
+ }
+ 
+ bool
+--- a/iokit/Kernel/arm/hid/SweetHID.cpp
++++ b/iokit/Kernel/arm/hid/SweetHID.cpp
+@@ -559,8 +559,8 @@
+ 	IOLockUnlock(fLock);
+ 
+ 	if (was != down) {
+-		IOLog("SWEET HID: touch %d %s at %d,%d%s\n", finger, down ? "down" : "up", x, y,
+-		    fEdge[finger] ? " edge" : "");
++		IOLog("SWEET LAT: touch %d %s at %d,%d%s ts %llu\n", finger, down ? "down" : "up", x, y,
++		    fEdge[finger] ? " edge" : "", now);
+ 	}
+ 	dispatchEvent(collection);
+ 	collection->release();
