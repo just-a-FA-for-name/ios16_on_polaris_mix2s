@@ -25,7 +25,7 @@ def encode(value):
 
 def fixture():
     return {
-        'VersionNumber': 1,
+        'VersionNumber': 7,
         'LaunchDaemons': {'/System/example.plist': {
             'Label': 'test.example', '_PanicOnCrash': True, 'ProgramArguments': ['/example']}},
         'AppExtensions': {'/test.appex': {'_infoPlist': {'CFBundleIdentifier': 'test.extension'}}},
@@ -115,6 +115,12 @@ class PosterLaunchdCacheTests(unittest.TestCase):
                 with self.assertRaises(FileExistsError):
                     main()
                 self.assertEqual({p.name: p.read_bytes() for p in output.iterdir()}, before)
+
+    def test_unsupported_or_wrongly_typed_cache_versions_are_rejected(self):
+        for version in (0, 1, 6, 8, True, 7.0, '7'):
+            with self.subTest(version=version):
+                with self.assertRaises(ValueError):
+                    prepare(encode(dict(fixture(), VersionNumber=version)), plistlib.dumps(JOB))
 
     def test_oversized_job_fails_before_output_creation(self):
         with tempfile.TemporaryDirectory() as directory:

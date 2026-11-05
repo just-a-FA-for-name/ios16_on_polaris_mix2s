@@ -41,6 +41,8 @@ def prepare(source, job_source):
     if not isinstance(cache, dict) or not {
             'VersionNumber', 'LaunchDaemons', 'AppExtensions'}.issubset(cache):
         raise ValueError('Unsupported launchd cache schema')
+    if type(cache['VersionNumber']) is not int or cache['VersionNumber'] != 7:
+        raise ValueError('Only the verified version 7 launchd cache is supported')
     jobs = cache['LaunchDaemons']
     if not isinstance(jobs, dict) or not isinstance(cache['AppExtensions'], dict):
         raise ValueError('Unsupported daemon or extension table')

@@ -1,5 +1,37 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## LATEST 2026-11-06 00:53: final review caught and fixed cache version gate omission
+
+Actual phone cache VersionNumber is integer7, but initial tool only checked key presence and its synthetic fixture used1. Added failing regression: versions0/1/6/8,booleanTrue,float7.0,string"7" were all wrongly accepted. Fixed strict integer7-only gate and corrected fixture to actual format. ALL104 local tests now pass (including standalone50000-trial ASan+UBSan fuzz). Reprocessed actual original cache in memory: prepared bytes remain EXACTLY identical to previously verified d6d38ba99dd434a912c0dacd050043f2f22234309eb1b5c120837c3d9dc32a53 artifact; no output/phone overwrite. Correct filename is ../device-private/poster-maintenance-cache-prepared/launchd-with-poster-maintenance.plist (not prepared-launchd.plist).
+
+The prior103-test CI42067559964 remains successful and all production C/binaries unchanged. This last fix is Python host tooling/tests only; commit and one final quick CI rerun pending. Final records must distinguish104 local tests from prior103 CI until rerun completes. TWRP3.7.0_9-0 re-confirmed via read-only getprop00:49; both handoff files UTF-8 verified. Deadline remains01:00, no further features/device changes.
+
+## CURRENT FINAL VERIFICATION 2026-11-06 00:48
+
+CI42067559964 SUCCESS at f584b7208be5cd2499a2cfd9bd0f04eb8a0c63c5.103 native macOS tests include standalone50000-trial ASan+UBSan H4 stream/command executable; iOS arm64 helper plus HFI/MDT/MSS/Bluetooth library compile/link/sign passed. This was MAINTENANCE_ONLY: kernel job intentionally skipped, NOT a new kernel build. Downloaded status.json/build.log/artifacts/validation.json at out/ci-42067559964; both binaries byte-identical to prior verified CI42064126143, SHA256 and all CodeDirectory pages revalidated. Local103 UBSan tests and repository101 patches/48 Python/7 shell validation also pass. No outstanding build/test failures.
+
+Completed source commits this continuation:6f8615a strict offline launch-cache preparation;9e499f5 Bluetooth H4 framing;a81045a legacy HFI region layout;f584b72 sanitized fuzz regressions. All pushed to experimental ci-fork/polaris-offline-fixes-20261106. No claim of merge or release.
+
+PHONE STILL TWRP. No further boot or persistent phone write after boot020 collection; later extracts went only to recovery RAM/host private storage. Maintenance executable/plist previously staged remain, but no execution/registration observed. Prepared launchd cache remains OFFLINE at ../device-private/poster-maintenance-cache-prepared (530->531 jobs,421 extensions preserved), NOT installed. Existing PosterBoard diagnostic compatibility remains from prior authorized work. No boot/recovery/firmware/persist/calibration/GPT changes this continuation.
+
+UNFINISHED / UNVERIFIED: wallpaper provider registration and selection/application; usable app launch/overall responsiveness; real GPU power/clocks/SMMU/GMU DMA/firmware/Metal integration; Wi-Fi modem/WLAN hardware, scanning/WPA2/DHCP/DNS/HTTPS/reconnect/cold start; Bluetooth UART/IRQ/DMA/firmware/NVM/IBS power handling/iOS interface/pairing. HFI tables and H4 parsing are protocol foundations, not hardware success. CPU preview generation is not accelerated rendering.
+
+NEXT OWNER-AWAKE ACTION: get explicit approval for replacing existing launchd cache via a separately reviewed bounded installer/rollback with exact original-byte checks; current0101 installer does NOT install that cache. Do not use raw HFS writes or blanket cache edits. Then temporary boot, verify maintenance execution/log/once marker and actual provider/query results before asking user to retry wallpaper. Separately measure driverkitd runtime limit/footprint and post-launch UI threads; do not raise global limits or disable trust/AMFI based on assumptions. Keep full1125x2436->1080x2160 geometry.
+
+SHUTDOWN: Windows task Devin-MIX2S-Shutdown-20261106-0100 retained for01:00+08, shutdown.exe /s /t 0 without force; last confirmed Ready00:30. Recheck before stopping. Actual power-off cannot be claimed in advance; unsaved apps may veto non-forced shutdown. All older IN PROGRESS/UNCOMMITTED notes below are chronological history superseded by this section.
+
+## IMMEDIATE 2026-11-06 00:45: final verification window, 15min until scheduled shutdown
+
+Read this first. User ASLEEP, requested autonomous work until01:00 then PC shutdown and detailed next-AI documentation. Phone remains TWRP; do NOT reboot or modify its existing files. All functionality failures remain as below. Windows task `Devin-MIX2S-Shutdown-20261106-0100` is already scheduled for2026-11-06 01:00+08 with `shutdown.exe /s /t 0`, no force; rechecked00:30 Ready. Do not cancel/extend. Save final records before deadline, do not falsely claim actual shutdown observed.
+
+LATEST CODE: f584b72 committed AND pushed to ci-fork/polaris-offline-fixes-20261106. Includes standalone50000-trial ASan+UBSan H4 fuzz harness and added Python test. ALL103 local tests under UBSan pass including independent ASan executable; repository101 patches/48 Python/7 shell pass. Working tree clean as of00:45:21 (this note now changes NOTES only).
+
+NEW CI42067559964 at f584b7208be5cd2499a2cfd9bd0f04eb8a0c63c5 IN PROGRESS at00:45:21, modeMAINTENANCE_ONLY. This reruns native103 tests (incl macOS ASan harness) and iOS helper+all4 module build. Previous CI42064126143 at a81045a already SUCCESS with102 tests and SAME production code; new commit changes tests/notes only. Wait/review new CI result, save log/artifacts if successful; if failure diagnose without weakening sanitizer/security checks, and document any remaining blocker before deadline. Do not start new large features now.
+
+NEXT ACTIONS before01:00: (1) fetch new CI status/log via portable gh with existing credential helper, process-only GH_TOKEN and existing system HTTPS_PROXY7890; (2) final repo/test/docs review; (3) update BOTH this file AND external ../给下一个AI的交接.md with final103/CI result, source commits, phone=TWRP, live maintenance files still inert because cache missing job, offline prepared cache NOT installed, unimplemented hardware and approval boundary; (4) commit NOTES/final verified edits, check git clean; (5) recheck Windows shutdown task remains Ready with01:00 deadline, then concise final status near deadline. The external handoff is outside git and already saved through00:42; preserve old history beneath newest section. PowerShell stdin loses Chinese literals: Python use `next(Path('..').glob('*AI*.md'))` or Unicode escapes to verify UTF-8. apply_patch Unicode absolute path works.
+
+No active shells currently needed except new CI cloud job. All previous download/test shells completed. Latest verified artifacts out/ci-42064126143 (helper88928B unchanged SHA5e50b834..., dylib86272B SHA2c646e30d96ebc091f326f56799d0f15d390ec6a5c1f5d1c370c86184c8bff8a, page hashes and5 new defined symbols checked). New CI may produce identical binaries; don't overwrite old artifacts.
+
 ## ACTIVE 2026-11-06 00:42: final verification in progress; shutdown at01:00 unchanged
 
 Current phone TWRP, owner asleep. No phone writes/boots after boot020 collection. Windows task was rechecked00:30:08:Ready, NextRun2026-11-06 01:00:00+08, `/s /t 0` (no force). Keep deadline; preserve/commit everything before it. Root handoff file updated through00:23, needs latest CI/fuzz/performance additions below before end. Do not stop early as if all functionality fixed.
