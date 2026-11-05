@@ -1,0 +1,104 @@
+--- a/bsd/dev/polaris_keys.c
++++ b/bsd/dev/polaris_keys.c
+@@ -1,5 +1,9 @@
+ /*
+  * Polaris PM8998 PON/GPIO keys, independent of the SM7150 Sweet driver.
++ * PMIC GPIO specifiers are 1-based hardware pin numbers, not zero-based
++ * array offsets: live-FDT gpio specifier 6 means GPIO6 at 0xc500/PPID0x0c5.
++ * Vendor pinctrl-spmi-gpio.c of_xlate matches pad->gpio_idx directly;
++ * pad->gpio_idx = i + PMIC_GPIO_PHYSICAL_OFFSET (1).
+  * Firmware owns all PMIC configuration. The only MMIO write is EXT_READL
+  * on an apps-owned observer channel; no PON, GPIO or interrupt state is set.
+  */
+@@ -21,13 +25,13 @@
+ #define PK_OBS_PA        0x0e600000u
+ #define PK_CNFG_PA       0x0c40a000u
+ #define PK_PON_PPID      0x008u
+-#define PK_GPIO7_PPID    0x0c6u
++#define PK_GPIO6_PPID    0x0c5u
+ #define PK_PON_RT        0x0810u
+-#define PK_GPIO7_RT      0x0c610u
+-#define PK_GPIO7_TYPE    0x0c604u
+-#define PK_GPIO7_SUBTYPE 0x0c605u
+-#define PK_GPIO7_MODE    0x0c640u
+-#define PK_GPIO7_ENABLE  0x0c646u
++#define PK_GPIO6_RT      0x0c510u
++#define PK_GPIO6_TYPE    0x0c504u
++#define PK_GPIO6_SUBTYPE 0x0c505u
++#define PK_GPIO6_MODE    0x0c540u
++#define PK_GPIO6_ENABLE  0x0c546u
+ #define PK_NO_APID       0xffffu
+ #define PK_KEY_COUNT     3u
+ 
+@@ -117,7 +121,7 @@
+ 		uint8_t pon = 0, gpio = 0;
+ 		bool pok = pk_read(pk_pon_apid, PK_PON_RT, &pon, &pk_pon_status);
+ 		bool gok = pk_gpio_apid != PK_NO_APID &&
+-		    pk_read(pk_gpio_apid, PK_GPIO7_RT, &gpio, &pk_gpio_status);
++		    pk_read(pk_gpio_apid, PK_GPIO6_RT, &gpio, &pk_gpio_status);
+ 		int now[PK_KEY_COUNT] = {
+ 			!!(pon & 1u), !(gpio & 1u), !!(pon & 2u)
+ 		};
+@@ -132,7 +136,7 @@
+ 		}
+ 		if (pk_gpio_apid != PK_NO_APID && !gok &&
+ 		    (gpio_errors++ % 250u) == 0) {
+-			printf("POLARIS KEYS: GPIO7 read failed apid=%u status=%#x\n",
++			printf("POLARIS KEYS: GPIO6 read failed apid=%u status=%#x\n",
+ 			    pk_gpio_apid, pk_gpio_status);
+ 		}
+ 		if (gok) {
+@@ -164,7 +168,7 @@
+ 			}
+ 			committed[key] = candidate[key];
+ 			stable[key] = 0;
+-			printf("POLARIS KEYS: key=%u down=%d pon=%#x gpio7=%#x\n",
++			printf("POLARIS KEYS: key=%u down=%d pon=%#x gpio6=%#x\n",
+ 			    key, committed[key], pon, gpio);
+ 			sweet_hid_key((int)key, committed[key]);
+ 		}
+@@ -204,8 +208,8 @@
+ 	}
+ 	uint32_t pon_owner = UINT32_MAX, gpio_owner = UINT32_MAX;
+ 	pk_pon_apid = pk_find_apid(PK_PON_PPID, count, &pon_owner);
+-	pk_gpio_apid = pk_find_apid(PK_GPIO7_PPID, count, &gpio_owner);
+-	printf("POLARIS KEYS: arb=%#x apids=%u pon=%u/owner%u gpio7=%u/owner%u\n",
++	pk_gpio_apid = pk_find_apid(PK_GPIO6_PPID, count, &gpio_owner);
++	printf("POLARIS KEYS: arb=%#x apids=%u pon=%u/owner%u gpio6=%u/owner%u\n",
+ 	    version, count, pk_pon_apid, pon_owner, pk_gpio_apid, gpio_owner);
+ 	if (pk_pon_apid == PK_NO_APID) {
+ 		printf("POLARIS KEYS: PM8998 PON channel absent; no key polling\n");
+@@ -223,26 +227,26 @@
+ 	}
+ 
+ 	uint8_t type = 0, subtype = 0, mode = 0, enable = 0;
+-	bool typeok = pk_read(pk_gpio_apid, PK_GPIO7_TYPE, &type, &pk_gpio_status);
+-	bool subok = pk_read(pk_gpio_apid, PK_GPIO7_SUBTYPE, &subtype, &pk_gpio_status);
+-	bool mok = pk_read(pk_gpio_apid, PK_GPIO7_MODE, &mode, &pk_gpio_status);
+-	bool eok = pk_read(pk_gpio_apid, PK_GPIO7_ENABLE, &enable, &pk_gpio_status);
++	bool typeok = pk_read(pk_gpio_apid, PK_GPIO6_TYPE, &type, &pk_gpio_status);
++	bool subok = pk_read(pk_gpio_apid, PK_GPIO6_SUBTYPE, &subtype, &pk_gpio_status);
++	bool mok = pk_read(pk_gpio_apid, PK_GPIO6_MODE, &mode, &pk_gpio_status);
++	bool eok = pk_read(pk_gpio_apid, PK_GPIO6_ENABLE, &enable, &pk_gpio_status);
+ 	unsigned int dir = (subtype == 0x10u || subtype == 0x11u) ?
+ 	    mode & 3u : (mode >> 4) & 7u;
+ 	bool subtypeok = subtype == 0x1u || subtype == 0x5u ||
+ 	    subtype == 0x9u || subtype == 0xdu || subtype == 0x10u || subtype == 0x11u;
+-	printf("POLARIS KEYS: GPIO7 type=%#x/%d subtype=%#x/%d mode=%#x/%d enable=%#x/%d dir=%u\n",
++	printf("POLARIS KEYS: GPIO6 type=%#x/%d subtype=%#x/%d mode=%#x/%d enable=%#x/%d dir=%u\n",
+ 	    type, typeok, subtype, subok, mode, mok, enable, eok, dir);
+ 	if (!typeok || !subok || !mok || !eok || type != 0x10u ||
+ 	    !subtypeok || !(enable & 0x80u) || (dir != 0 && dir != 2)) {
+-		printf("POLARIS KEYS: GPIO7 not confirmed as enabled input; volume-up withheld\n");
++		printf("POLARIS KEYS: GPIO6 not confirmed as enabled input; volume-up withheld\n");
+ 		pk_gpio_apid = PK_NO_APID;
+ 	}
+ 
+ 	kern_return_t kr = kernel_thread_start(pk_thread, NULL, &thread);
+ 	if (kr == KERN_SUCCESS) {
+ 		thread_deallocate(thread);
+-		printf("POLARIS KEYS: PM8998 polling started; power/volume-down PON, volume-up GPIO7\n");
++		printf("POLARIS KEYS: PM8998 polling started; power/volume-down PON, volume-up GPIO6\n");
+ 	} else {
+ 		printf("POLARIS KEYS: kernel_thread_start failed %d\n", kr);
+ 	}
