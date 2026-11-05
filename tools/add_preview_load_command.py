@@ -15,10 +15,10 @@ import struct
 
 LIBRARY=b'@executable_path/PolarisPreviewCompat.dylib\0'
 
-def directories(data):
+def directories(data,allowed_filetypes=(2,)):
     magic,cpu,subtype,filetype,count,length,flags,reserved=struct.unpack_from('<8I',data)
-    if magic!=0xfeedfacf or cpu!=0x0100000c or filetype!=2:
-        raise ValueError('Expected thin arm64 executable')
+    if magic!=0xfeedfacf or cpu!=0x0100000c or filetype not in allowed_filetypes:
+        raise ValueError('Expected thin arm64 Mach-O of the requested type')
     off=32;signature=None;first_section=len(data)
     for i in range(count):
         cmd,size=struct.unpack_from('<II',data,off)
