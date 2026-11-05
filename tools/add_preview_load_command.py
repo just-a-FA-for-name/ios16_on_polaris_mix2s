@@ -13,7 +13,8 @@ import json
 from pathlib import Path
 import struct
 
-LIBRARY=b'@executable_path/PolarisPreviewCompat.dylib\0'
+LIBRARY=b'/Applications/PosterBoard.app/PolarisPreviewCompat.dylib\0'
+LEGACY_LIBRARY=b'@executable_path/PolarisPreviewCompat.dylib\0'
 
 def directories(data,allowed_filetypes=(2,)):
     magic,cpu,subtype,filetype,count,length,flags,reserved=struct.unpack_from('<8I',data)
@@ -34,7 +35,7 @@ def directories(data,allowed_filetypes=(2,)):
         if cmd==0x1d:signature=struct.unpack_from('<II',data,off+8)
         if cmd in (0xc,0x80000018,0x8000001f):
             nameoff=struct.unpack_from('<I',data,off+8)[0]
-            if data[off+nameoff:off+size].split(b'\0')[0]==LIBRARY[:-1]:
+            if data[off+nameoff:off+size].split(b'\0')[0] in (LIBRARY[:-1],LEGACY_LIBRARY[:-1]):
                 raise ValueError('Compatibility load command already present')
         off+=size
     if off!=32+length or signature is None:raise ValueError('Invalid header/signature')

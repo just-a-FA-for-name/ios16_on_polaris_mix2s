@@ -1,6 +1,8 @@
 import hashlib
 import struct
 import unittest
+from unittest.mock import patch
+import add_preview_load_command
 from add_preview_load_command import transform, directories, validate_hashes, LIBRARY
 
 
@@ -21,6 +23,24 @@ def fixture(padding_byte=False):
 
 
 class PreviewLoadCommandTests(unittest.TestCase):
+    def test_uses_absolute_path_without_restricted_dyld_expansion(self):
+        original=fixture()
+        result,report=transform(original)
+        begin,end=report['load_command_range']
+        cmd,size,nameoff=struct.unpack_from('<3I',result,begin)
+        self.assertEqual(cmd,0xc)
+        self.assertEqual(size,end-begin)
+        self.assertEqual(size%8,0)
+        self.assertEqual(result[begin+nameoff:end].split(b'\0')[0],
+            b'/Applications/PosterBoard.app/PolarisPreviewCompat.dylib')
+        self.assertEqual(struct.unpack_from('<2I',result,16),(3,168+size))
+
+    def test_rejects_legacy_relative_load_command(self):
+        with patch.object(add_preview_load_command,'LIBRARY',
+                b'@executable_path/PolarisPreviewCompat.dylib\0'):
+            legacy,_=transform(fixture())
+        with self.assertRaisesRegex(ValueError,'already present'):transform(legacy)
+
     def test_adds_library_preserves_all_executable_bytes_and_rehashes(self):
         original=fixture()
         result,report=transform(original)
