@@ -170,9 +170,10 @@ jobs:
           xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 \
             -isysroot "$SDK" -fobjc-arc -fblocks -dynamiclib \
             -Werror=implicit-function-declaration -Wno-deprecated-declarations \
-            userland/PolarisPreviewCompat.m -o preview-out/PolarisPreviewCompat.dylib \
+            userland/PolarisPreviewCompat.m userland/PolarisPosterDiagnostics.m \
+            -o preview-out/PolarisPreviewCompat.dylib \
             -framework Foundation -framework UIKit -framework QuartzCore -framework CoreGraphics -framework Metal \
-            -Wl,-install_name,@executable_path/PolarisPreviewCompat.dylib
+            -Wl,-install_name,/Applications/PosterBoard.app/PolarisPreviewCompat.dylib
           codesign --force --sign - preview-out/PolarisPreviewCompat.dylib
           codesign --verify --strict preview-out/PolarisPreviewCompat.dylib
           file preview-out/PolarisPreviewCompat.dylib

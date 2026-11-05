@@ -14,20 +14,23 @@
 
 static IMP originalPreview;
 static unsigned int loggedPreviews;
+extern void PolarisPosterDiagnostics(void (*logger)(NSString *));
 
 static void PreviewLog(NSString *message)
 {
     @autoreleasepool {
-        NSString *path = [NSHomeDirectory() stringByAppendingPathComponent:
-            @"Library/Caches/PolarisPreviewCompat.log"];
-        NSData *data = [[message stringByAppendingString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding];
-        NSFileHandle *file = [NSFileHandle fileHandleForWritingAtPath:path];
-        if (file) {
-            [file seekToEndOfFile];
-            [file writeData:data];
-            [file closeFile];
-        } else {
-            [data writeToFile:path atomically:YES];
+        @synchronized ([NSFileHandle class]) {
+            NSString *path = [NSHomeDirectory() stringByAppendingPathComponent:
+                @"Library/Caches/PolarisPreviewCompat.log"];
+            NSData *data = [[message stringByAppendingString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding];
+            NSFileHandle *file = [NSFileHandle fileHandleForWritingAtPath:path];
+            if (file) {
+                [file seekToEndOfFile];
+                [file writeData:data];
+                [file closeFile];
+            } else {
+                [data writeToFile:path atomically:YES];
+            }
         }
     }
 }
@@ -100,5 +103,6 @@ __attribute__((constructor)) static void InstallPreviewFallback(void)
         originalPreview = method_getImplementation(method);
         method_setImplementation(method, (IMP)CPUHomeScreenPreview);
         PreviewLog(@"Scoped PBFHomeScreenPreviewImageBuilder CPU fallback installed");
+        PolarisPosterDiagnostics(PreviewLog);
     }
 }
