@@ -1,5 +1,17 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## START HERE — 2026-11-06 00:55 final results saved before scheduled01:00 shutdown
+
+Final source commit01ebeecabf1c4c44b076c3749249093abfe60910 fixes the omitted version gate: ONLY actual verified integer VersionNumber7 accepted. Regression first failed for7 unsupported/type-confused values, then passed. ALL104 local tests pass; final CI42069117565 SUCCESS with104 macOS tests, standalone50000-trial ASan+UBSan H4 fuzz, and iOS arm64 compile/link/sign. Previous full103 suite ran under UBSan too; new104th test is Python-only. Repository validation101 patches/48 Python/7 shell passed after final edit.
+
+Final artifacts/status/build.log/validation.json: out/ci-42069117565. Helper88928B SHA5e50b834d99e000e845f7b2184a3b28fdbee7a0f70afb1defdef56e5c2d728c6; library86272B SHA2c646e30d96ebc091f326f56799d0f15d390ec6a5c1f5d1c370c86184c8bff8a. Both byte-identical to prior validated artifacts and CodeDirectory pages checked again. MAINTENANCE_ONLY intentionally skipped kernel build. No remaining CI/test failures; no new hardware success.
+
+All5 source commits6f8615a/9e499f5/a81045a/f584b72/01ebeec pushed to ci-fork/polaris-offline-fixes-20261106. Final documentation commit may follow locally. External ../给下一个AI的交接.md saved separately (outside git).
+
+Phone read-only check00:49 confirms TWRP3.7.0_9-0. NO new boot or persistent device write this continuation. Offline launchd-with-poster-maintenance.plist reverified byte-identical even after version7 fix; NOT installed. Wallpaper, severe lag/app usability, real GPU/Metal, Wi-Fi and Bluetooth remain unfinished/unverified. Exact next-owner-awake actions and safety/rollback limits in00:48 section below remain mandatory; do not infer deployment approval from source completion.
+
+Shutdown task rechecked00:54:15:Ready,Enabled=true,WakeToRun=true,StartWhenAvailable=true,BatteryBlocked=false; NextRun2026-11-06 01:00:00+08; C:\WINDOWS\System32\shutdown.exe /s /t 0. No force option, no cancellation or extension. Save/commit then allow scheduler to act independently. Actual physical shutdown not observed in advance; apps can veto non-forced shutdown. All earlier “pending CI/uncommitted/103 tests” entries below are historical and superseded.
+
 ## LATEST 2026-11-06 00:53: final review caught and fixed cache version gate omission
 
 Actual phone cache VersionNumber is integer7, but initial tool only checked key presence and its synthetic fixture used1. Added failing regression: versions0/1/6/8,booleanTrue,float7.0,string"7" were all wrongly accepted. Fixed strict integer7-only gate and corrected fixture to actual format. ALL104 local tests now pass (including standalone50000-trial ASan+UBSan fuzz). Reprocessed actual original cache in memory: prepared bytes remain EXACTLY identical to previously verified d6d38ba99dd434a912c0dacd050043f2f22234309eb1b5c120837c3d9dc32a53 artifact; no output/phone overwrite. Correct filename is ../device-private/poster-maintenance-cache-prepared/launchd-with-poster-maintenance.plist (not prepared-launchd.plist).
