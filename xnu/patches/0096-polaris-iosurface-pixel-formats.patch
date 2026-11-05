@@ -1,0 +1,207 @@
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -81,6 +81,9 @@
+ #define SWEET_FB_LOGICAL_W              1125
+ #define SWEET_FB_LOGICAL_H              2436
+ #define SWEET_FB_FORMAT_BGRA            0x42475241
++#define SWEET_FB_FORMAT_RGB10_WG        0x77333072 /* w30r: RGB101010, codes 384..895 */
++#define SWEET_FB_FORMAT_RGB10_ALPHA     0x62336138 /* b3a8: RGB10 plane + 8-bit alpha plane */
++#define SWEET_FB_FORMAT_LA08            0x4c413038 /* LA08: luminance, alpha */
+ 
+ class IOMobileFramebuffer : public IOService {
+ 	OSDeclareDefaultStructors(IOMobileFramebuffer);
+@@ -336,6 +339,64 @@
+ 	}
+ }
+ 
++static uint8_t
++sweet_fb_rgb10_to_u8(uint32_t value, bool wide_gamut)
++{
++	if (wide_gamut) {
++		if (value <= 384) {
++			return 0;
++		}
++		if (value >= 895) {
++			return 255;
++		}
++		return (uint8_t)(((value - 384) * 255 + 255) / 511);
++	}
++	return (uint8_t)((value * 255 + 511) / 1023);
++}
++
++static uint32_t
++sweet_fb_pixel(const SweetSurface *s, uintptr_t src, uint32_t offset, uint32_t bpr,
++    uint32_t alpha_offset, uint32_t alpha_bpr, int32_t x, int32_t y)
++{
++	if (s->pixelFormat == SWEET_FB_FORMAT_RGB10_WG ||
++	    s->pixelFormat == SWEET_FB_FORMAT_RGB10_ALPHA) {
++		uint32_t packed = *(const uint32_t *)(src + offset + (uint64_t)y * bpr + (uint64_t)x * 4);
++		bool wide = s->pixelFormat == SWEET_FB_FORMAT_RGB10_WG;
++		uint32_t r = sweet_fb_rgb10_to_u8(packed & 0x3ffu, wide);
++		uint32_t g = sweet_fb_rgb10_to_u8((packed >> 10) & 0x3ffu, wide);
++		uint32_t b = sweet_fb_rgb10_to_u8((packed >> 20) & 0x3ffu, wide);
++		uint32_t a = s->pixelFormat == SWEET_FB_FORMAT_RGB10_ALPHA ?
++		    *(const uint8_t *)(src + alpha_offset + (uint64_t)y * alpha_bpr + x) : 255;
++		return (a << 24) | (b << 16) | (g << 8) | r;
++	}
++	if (s->pixelFormat == SWEET_FB_FORMAT_LA08) {
++		const uint8_t *p = (const uint8_t *)(src + offset + (uint64_t)y * bpr + (uint64_t)x * 2);
++		return ((uint32_t)p[1] << 24) | ((uint32_t)p[0] << 16) |
++		    ((uint32_t)p[0] << 8) | p[0];
++	}
++	return 0xff000000;
++}
++
++static void
++sweet_fb_unknown_format(uint32_t format, uint32_t planes, uint32_t bpe)
++{
++	static uint32_t reported[16];
++	uint32_t key = format ^ 0x80000000u;
++	for (uint32_t value : reported) {
++		if (value == key) {
++			return;
++		}
++	}
++	for (uint32_t &value : reported) {
++		if (value == 0) {
++			value = key;
++			IOLog("SWEET FB: unsupported surface format 0x%x planes %u bpe %u; copy withheld\n",
++			    format, planes, bpe);
++			return;
++		}
++	}
++}
++
+ void
+ AppleCLCD::present(const uint8_t *rec)
+ {
+@@ -376,7 +437,21 @@
+ 			continue;
+ 		}
+ 		uintptr_t src = s->kernelAddress();
+-		uint32_t bpe = s->bytesPerElement ? s->bytesPerElement : 4;
++		const sweet_surface_plane *plane = s->planeCount ? &s->planes[0] : NULL;
++		uint32_t src_offset = plane ? plane->offset : s->offset;
++		uint32_t src_bpr = plane ? plane->bytesPerRow : s->bytesPerRow;
++		uint32_t src_bpe = plane ? plane->bytesPerElement : s->bytesPerElement;
++		uint32_t src_ew = plane ? plane->elementWidth : s->elementWidth;
++		uint32_t src_eh = plane ? plane->elementHeight : s->elementHeight;
++		uint32_t alpha_offset = 0, alpha_bpr = 0;
++		bool supported = s->pixelFormat == SWEET_FB_FORMAT_BGRA ||
++		    s->pixelFormat == SWEET_FB_FORMAT_RGB10_WG ||
++		    s->pixelFormat == SWEET_FB_FORMAT_RGB10_ALPHA ||
++		    s->pixelFormat == SWEET_FB_FORMAT_LA08;
++		if (!supported) {
++			sweet_fb_unknown_format(s->pixelFormat, s->planeCount, src_bpe);
++			src = 0;
++		}
+ 		if (w <= 0 || h <= 0) {
+ 			w = (int32_t)s->width;
+ 			h = (int32_t)s->height;
+@@ -434,14 +509,31 @@
+ 				h = (int32_t)fHeight - dy;
+ 			}
+ 		}
+-		uint64_t last = (uint64_t)s->offset + (uint64_t)(sy + h - 1) * s->bytesPerRow +
+-		    (uint64_t)(sx + w) * 4;
+-		if (w <= 0 || h <= 0 || s->elementWidth != 1 || s->elementHeight != 1 ||
+-		    s->memory == NULL || last > s->memory->getLength()) {
++		uint64_t last = (uint64_t)src_offset + (uint64_t)(sy + h - 1) * src_bpr +
++		    (uint64_t)(sx + w) * src_bpe;
++		if (w <= 0 || h <= 0 || src_ew != 1 || src_eh != 1 ||
++		    s->memory == NULL || last > s->memory->getLength() ||
++		    (s->pixelFormat == SWEET_FB_FORMAT_BGRA && src_bpe != 4) ||
++		    (s->pixelFormat == SWEET_FB_FORMAT_LA08 && src_bpe != 2) ||
++		    ((s->pixelFormat == SWEET_FB_FORMAT_RGB10_WG ||
++		      s->pixelFormat == SWEET_FB_FORMAT_RGB10_ALPHA) && src_bpe != 4)) {
+ 			src = 0;
+ 		}
+-		if (src != 0 && bpe == 4 && fScale) {
+-			/* Scale the logical rectangle into the panel content area. */
++		if (s->pixelFormat == SWEET_FB_FORMAT_RGB10_ALPHA) {
++			if (s->planeCount < 2 || s->planes[1].bytesPerElement != 1 ||
++			    s->planes[1].elementWidth != 1 || s->planes[1].elementHeight != 1) {
++				src = 0;
++			} else {
++				alpha_offset = s->planes[1].offset;
++				alpha_bpr = s->planes[1].bytesPerRow;
++				uint64_t alpha_last = (uint64_t)alpha_offset +
++				    (uint64_t)(sy + h - 1) * alpha_bpr + (uint64_t)(sx + w);
++				if (s->memory == NULL || alpha_last > s->memory->getLength()) {
++					src = 0;
++				}
++			}
++		}
++		if (src != 0 && s->pixelFormat != SWEET_FB_FORMAT_BGRA && fScale) {
+ 			int32_t px0 = fOffX + (int32_t)(((int64_t)dx * fContentW) / fLogicalW);
+ 			int32_t py0 = fOffY + (int32_t)(((int64_t)dy * fContentH) / fLogicalH);
+ 			int32_t px1 = fOffX + (int32_t)(((int64_t)(dx + w) * fContentW) / fLogicalW);
+@@ -466,8 +558,45 @@
+ 					continue;
+ 				}
+ 				uint32_t *drow = (uint32_t *)(fPixels + (uint64_t)y * fRowBytes);
+-				const uint32_t *srow = (const uint32_t *)(src + s->offset +
+-				    (uint64_t)syy * s->bytesPerRow);
++				uint64_t xpos = (uint64_t)(px0 - fOffX) * xstep;
++				for (int32_t x = px0; x < px1; x++) {
++					int32_t lx = (int32_t)(xpos >> 16);
++					xpos += xstep;
++					if (lx < dx || lx >= dx + w) {
++						continue;
++					}
++					drow[x] = sweet_fb_pixel(s, src, src_offset, src_bpr,
++					    alpha_offset, alpha_bpr, sx + lx - dx, syy);
++				}
++			}
++		} else if (src != 0 && s->pixelFormat == SWEET_FB_FORMAT_BGRA && fScale) {
++			/* Scale the logical rectangle into the panel content area. */
++			int32_t px0 = fOffX + (int32_t)(((int64_t)dx * fContentW) / fLogicalW);
++			int32_t py0 = fOffY + (int32_t)(((int64_t)dy * fContentH) / fLogicalH);
++			int32_t px1 = fOffX + (int32_t)(((int64_t)(dx + w) * fContentW) / fLogicalW);
++			int32_t py1 = fOffY + (int32_t)(((int64_t)(dy + h) * fContentH) / fLogicalH);
++			if (px0 < 0) {
++				px0 = 0;
++			}
++			if (py0 < 0) {
++				py0 = 0;
++			}
++			if (px1 > (int32_t)fWidth) {
++				px1 = (int32_t)fWidth;
++			}
++			if (py1 > (int32_t)fHeight) {
++				py1 = (int32_t)fHeight;
++			}
++			uint64_t xstep = ((uint64_t)fLogicalW << 16) / fContentW;
++			for (int32_t y = py0; y < py1; y++) {
++				int32_t ly = (int32_t)(((int64_t)(y - fOffY) * fLogicalH) / fContentH);
++				int32_t syy = sy + ly - dy;
++				if (syy < sy || syy >= sy + h) {
++					continue;
++				}
++				uint32_t *drow = (uint32_t *)(fPixels + (uint64_t)y * fRowBytes);
++				const uint32_t *srow = (const uint32_t *)(src + src_offset +
++				    (uint64_t)syy * src_bpr);
+ 				uint64_t xpos = (uint64_t)(px0 - fOffX) * xstep;
+ 				for (int32_t x = px0; x < px1; x++) {
+ 					int32_t lx = (int32_t)(xpos >> 16);
+@@ -478,10 +607,18 @@
+ 					drow[x] = srow[sx + lx - dx];
+ 				}
+ 			}
+-		} else if (src != 0 && bpe == 4) {
++		} else if (src != 0 && s->pixelFormat != SWEET_FB_FORMAT_BGRA) {
++			for (int32_t y = 0; y < h; y++) {
++				uint32_t *drow = (uint32_t *)(fPixels + (uint64_t)(dy + y) * fRowBytes);
++				for (int32_t x = 0; x < w; x++) {
++					drow[dx + x] = sweet_fb_pixel(s, src, src_offset, src_bpr,
++					    alpha_offset, alpha_bpr, sx + x, sy + y);
++				}
++			}
++		} else if (src != 0) {
+ 			for (int32_t y = 0; y < h; y++) {
+ 				memcpy((void *)(fPixels + (uint64_t)(dy + y) * fRowBytes + (uint64_t)dx * 4),
+-				    (const void *)(src + s->offset + (uint64_t)(sy + y) * s->bytesPerRow + (uint64_t)sx * 4),
++				    (const void *)(src + src_offset + (uint64_t)(sy + y) * src_bpr + (uint64_t)sx * 4),
+ 				    (size_t)w * 4);
+ 			}
+ 		}
