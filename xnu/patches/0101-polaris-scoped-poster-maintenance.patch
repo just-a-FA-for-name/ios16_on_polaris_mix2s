@@ -1,0 +1,171 @@
+--- /dev/null
++++ b/bsd/dev/polaris_poster_maintenance.c
+@@ -0,0 +1,147 @@
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <sys/errno.h>
++#include <sys/fcntl.h>
++#include <sys/uio.h>
++#include <sys/vnode.h>
++#include <kern/kalloc.h>
++#include <machine/machine_routines.h>
++#include <pexpert/pexpert.h>
++#include <pexpert/device_tree.h>
++
++extern bool polaris_touch_i2c_board(void);
++void polaris_poster_maintenance_install(void);
++
++#define PM_TOOL "/usr/libexec/polaris-poster-maintenance"
++#define PM_PLIST "/Library/LaunchDaemons/com.polaris.poster-maintenance.plist"
++#define PM_LIMIT (512u * 1024u)
++
++struct pm_blob { const uint8_t *bytes; uint32_t size; };
++
++static const uint8_t pm_plist[] =
++    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
++    "<plist version=\"1.0\"><dict>"
++    "<key>Label</key><string>com.polaris.poster-maintenance</string>"
++    "<key>ProgramArguments</key><array>"
++    "<string>" PM_TOOL "</string><string>--register-gradient-once</string>"
++    "</array><key>UserName</key><string>root</string>"
++    "<key>RunAtLoad</key><true/>"
++    "<key>LaunchOnlyOnce</key><true/>"
++    "<key>ProcessType</key><string>Background</string>"
++    "</dict></plist>\n";
++
++static bool pm_number(DTEntry node, const char *key, uint64_t *value)
++{
++    const void *data = NULL;
++    unsigned length = 0;
++    if (SecureDTGetProperty(node, key, &data, &length) != kSuccess ||
++        data == NULL || length != sizeof(*value)) return false;
++    memcpy(value, data, sizeof(*value));
++    return true;
++}
++
++static bool pm_payload(struct pm_blob *blob)
++{
++    DTEntry chosen, map;
++    const void *data = NULL;
++    unsigned length = 0;
++    uint64_t base, size, region[2];
++    if (SecureDTLookupEntry(NULL, "/chosen", &chosen) != kSuccess ||
++        SecureDTLookupEntry(NULL, "/chosen/memory-map", &map) != kSuccess ||
++        !pm_number(chosen, "dram-base", &base) ||
++        !pm_number(chosen, "dram-size", &size) || base + size < base ||
++        SecureDTGetProperty(map, "PolarisPosterMaintenance", &data, &length) != kSuccess ||
++        data == NULL || length != sizeof(region)) return false;
++    memcpy(region, data, sizeof(region));
++    if ((region[0] & 0x3fffull) || region[1] < 32 || region[1] > PM_LIMIT ||
++        region[0] < base || region[0] + region[1] < region[0] ||
++        region[0] + region[1] > base + size) return false;
++    vm_offset_t address = ml_static_ptovirt((vm_offset_t)region[0]);
++    if (!address) return false;
++    blob->bytes = (const uint8_t *)address;
++    blob->size = (uint32_t)region[1];
++    uint32_t header[4];
++    memcpy(header, blob->bytes, sizeof(header));
++    return header[0] == 0xfeedfacfu && header[1] == 0x0100000cu && header[3] == 2;
++}
++
++static int pm_compare(const char *path, const struct pm_blob *blob, bool *exists)
++{
++    vfs_context_t ctx = vfs_context_kernel();
++    vnode_t vp = NULLVP;
++    *exists = false;
++    int error = vnode_open(path, FREAD | O_NOFOLLOW, 0, 0, &vp, ctx);
++    if (error == ENOENT) return 0;
++    if (error) return error;
++    *exists = true;
++    struct vnode_attr attr;
++    VATTR_INIT(&attr);
++    VATTR_WANTED(&attr, va_data_size);
++    VATTR_WANTED(&attr, va_uid);
++    VATTR_WANTED(&attr, va_nlink);
++    error = vnode_getattr(vp, &attr, ctx);
++    if (!error && (!vnode_isreg(vp) || attr.va_uid != 0 ||
++        attr.va_nlink != 1 || attr.va_data_size != blob->size)) error = EEXIST;
++    if (!error) {
++        uint8_t *buffer = kalloc_data(blob->size, Z_WAITOK);
++        if (!buffer) {
++            error = ENOMEM;
++        } else {
++            int residual = 0;
++            error = vn_rdwr(UIO_READ, vp, (caddr_t)buffer, (int)blob->size, 0,
++                UIO_SYSSPACE, 0, vfs_context_ucred(ctx), &residual, vfs_context_proc(ctx));
++            if (!error && (residual || memcmp(buffer, blob->bytes, blob->size)))
++                error = EEXIST;
++            kfree_data(buffer, blob->size);
++        }
++    }
++    int closed = vnode_close(vp, FREAD, ctx);
++    return error ? error : closed;
++}
++
++static int pm_create(const char *path, const struct pm_blob *blob, int mode)
++{
++    vfs_context_t ctx = vfs_context_kernel();
++    vnode_t vp = NULLVP;
++    int error = vnode_open(path, FWRITE | O_CREAT | O_EXCL | O_NOFOLLOW, mode, 0, &vp, ctx);
++    if (error) return error;
++    int residual = 0;
++    error = vn_rdwr(UIO_WRITE, vp, (caddr_t)blob->bytes, (int)blob->size, 0,
++        UIO_SYSSPACE, IO_SYNC | IO_UNIT, vfs_context_ucred(ctx), &residual, vfs_context_proc(ctx));
++    if (!error && residual) error = EIO;
++    int closed = vnode_close(vp, FWRITE, ctx);
++    if (!error) error = closed;
++    bool exists = false;
++    if (!error) error = pm_compare(path, blob, &exists);
++    if (!error && !exists) error = EIO;
++    return error;
++}
++
++void polaris_poster_maintenance_install(void)
++{
++    int enabled = 0;
++    if (!polaris_touch_i2c_board()) return;
++    (void)PE_parse_boot_argn("polarispostermaintenance", &enabled, sizeof(enabled));
++    if (enabled != 1) return;
++    struct pm_blob tool, plist = { pm_plist, (uint32_t)sizeof(pm_plist) - 1 };
++    if (!pm_payload(&tool)) {
++        printf("POLARIS POSTER MAINTENANCE: invalid reserved executable; no writes\n");
++        return;
++    }
++    bool tool_exists = false, plist_exists = false;
++    int error = pm_compare(PM_TOOL, &tool, &tool_exists);
++    if (!error) error = pm_compare(PM_PLIST, &plist, &plist_exists);
++    if (error) {
++        printf("POLARIS POSTER MAINTENANCE: target preflight failed %d; no writes\n", error);
++        return;
++    }
++    if (plist_exists && !tool_exists) {
++        printf("POLARIS POSTER MAINTENANCE: orphan launch job; no writes\n");
++        return;
++    }
++    if (!tool_exists) error = pm_create(PM_TOOL, &tool, 0755);
++    if (!error && !plist_exists) error = pm_create(PM_PLIST, &plist, 0644);
++    printf("POLARIS POSTER MAINTENANCE: exclusive staging result %d; registration not yet observed\n", error);
++}
++#endif
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -117,6 +117,7 @@
+ bsd/dev/polaris_gpu.c			standard
+ bsd/dev/polaris_keys.c			standard
+ bsd/dev/polaris_preview_install.c	standard
++bsd/dev/polaris_poster_maintenance.c	standard
+ bsd/dev/mem.c				standard
+ bsd/dev/munge.c 			optional config_requires_u32_munging
+ bsd/dev/unix_startup.c			standard
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -1103,6 +1103,8 @@
+ 	/* Root is mounted; use ordinary VFS I/O before any application starts. */
+ 	extern void polaris_preview_install(void);
+ 	polaris_preview_install();
++	extern void polaris_poster_maintenance_install(void);
++	polaris_poster_maintenance_install();
+ #endif
+ 	load_init_program(p);
+ 	lock_trace = 1;

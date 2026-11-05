@@ -124,6 +124,43 @@ jobs:
           path: out/
           if-no-files-found: warn
 
+  poster-maintenance:
+    if: ${{ inputs.kernel_config == 'RELEASE' }}
+    runs-on: macos-15-intel
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify native tests and one-shot maintenance executable
+        run: |
+          python3 -m unittest discover -s tools -p 'test_*.py' -v
+          XC=$(ls -d /Applications/Xcode_*.app | sort -V | head -1)
+          export DEVELOPER_DIR="$XC/Contents/Developer"
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          mkdir -p maintenance-out
+          xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 \
+            -isysroot "$SDK" -fobjc-arc -fblocks -Wall -Wextra \
+            -Werror=implicit-function-declaration -Wno-deprecated-declarations \
+            userland/PolarisPosterMaintenance.m -framework Foundation \
+            -o maintenance-out/polaris-poster-maintenance
+          codesign --force --sign - --entitlements userland/PolarisPosterMaintenance.entitlements.plist \
+            maintenance-out/polaris-poster-maintenance
+          codesign --verify --strict maintenance-out/polaris-poster-maintenance
+          file maintenance-out/polaris-poster-maintenance
+          otool -L maintenance-out/polaris-poster-maintenance
+          xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 \
+            -isysroot "$SDK" -std=c11 -Wall -Wextra -Werror -dynamiclib \
+            userland/polaris_hfi.c userland/polaris_mdt.c userland/polaris_mss.c \
+            -Wl,-install_name,/usr/local/lib/libPolarisBringup.dylib \
+            -o maintenance-out/libPolarisBringup.dylib
+          codesign --force --sign - maintenance-out/libPolarisBringup.dylib
+          codesign --verify --strict maintenance-out/libPolarisBringup.dylib
+          (cd maintenance-out && shasum -a 256 polaris-poster-maintenance libPolarisBringup.dylib > SHA256SUMS)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: polaris-poster-maintenance
+          path: maintenance-out/
+          retention-days: 7
+
   driver-foundations:
     if: ${{ inputs.kernel_config == 'DRIVER_FOUNDATIONS' }}
     runs-on: macos-15-intel
