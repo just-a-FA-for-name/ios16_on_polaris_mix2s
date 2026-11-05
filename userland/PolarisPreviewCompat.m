@@ -7,6 +7,7 @@
 #import <QuartzCore/QuartzCore.h>
 #import <Metal/Metal.h>
 #import <objc/runtime.h>
+#import <dispatch/dispatch.h>
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -33,7 +34,15 @@ static void PreviewLog(NSString *message)
 
 static UIImage *CPUHomeScreenPreview(id object, SEL selector, UIView *view)
 {
-    if (MTLCreateSystemDefaultDevice() != nil && originalPreview != NULL) {
+    static dispatch_once_t capabilityOnce;
+    static BOOL usableMetalQueue;
+    dispatch_once(&capabilityOnce, ^{
+        id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+        usableMetalQueue = device != nil && [device newCommandQueue] != nil;
+        PreviewLog(usableMetalQueue ? @"Usable Metal queue: retaining original preview path" :
+            @"No usable Metal queue: using CPU bitmap preview");
+    });
+    if (usableMetalQueue && originalPreview != NULL) {
         return ((UIImage *(*)(id, SEL, UIView *))originalPreview)(object, selector, view);
     }
     if (![view respondsToSelector:@selector(layer)]) {
@@ -84,7 +93,7 @@ __attribute__((constructor)) static void InstallPreviewFallback(void)
     @autoreleasepool {
         Class builder = objc_getClass("PBFHomeScreenPreviewImageBuilder");
         Method method = builder ? class_getInstanceMethod(builder, sel_registerName("_imageForView:")) : NULL;
-        if (method == NULL) {
+        if (method == NULL || method_getNumberOfArguments(method) != 3) {
             PreviewLog(@"Fallback NOT installed: expected iOS16 method missing");
             return;
         }
