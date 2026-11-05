@@ -34,6 +34,7 @@ env:
 
 jobs:
   build:
+    if: ${{ inputs.kernel_config != 'PREVIEW_ONLY' }}
     # macos-14 was retired on 2026-11-02. Use Intel macOS 15 and select its
     # oldest Xcode below; 0095 adds the IORPC.kernelContent ABI used by Xcode 16 iig.
     runs-on: macos-15-intel
@@ -122,3 +123,32 @@ jobs:
           name: xnu-kernel
           path: out/
           if-no-files-found: warn
+
+  preview-compat:
+    if: ${{ inputs.kernel_config == 'PREVIEW_ONLY' }}
+    runs-on: macos-15-intel
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile scoped iOS16 bitmap preview fallback
+        run: |
+          XC=$(ls -d /Applications/Xcode_*.app | sort -V | head -1)
+          export DEVELOPER_DIR="$XC/Contents/Developer"
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          mkdir -p preview-out
+          xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 \
+            -isysroot "$SDK" -fobjc-arc -fblocks -dynamiclib \
+            -Werror=implicit-function-declaration -Wno-deprecated-declarations \
+            userland/PolarisPreviewCompat.m -o preview-out/PolarisPreviewCompat.dylib \
+            -framework Foundation -framework UIKit -framework QuartzCore -framework Metal \
+            -Wl,-install_name,@executable_path/PolarisPreviewCompat.dylib
+          codesign --force --sign - preview-out/PolarisPreviewCompat.dylib
+          codesign --verify --strict preview-out/PolarisPreviewCompat.dylib
+          file preview-out/PolarisPreviewCompat.dylib
+          otool -L preview-out/PolarisPreviewCompat.dylib
+          (cd preview-out && shasum -a 256 PolarisPreviewCompat.dylib > SHA256SUMS)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: polaris-preview-compat
+          path: preview-out/
+          retention-days: 7
