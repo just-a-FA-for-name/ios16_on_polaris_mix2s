@@ -33,5 +33,8 @@ int polaris_mdt_stage(const uint8_t *metadata, size_t metadata_size,
     uint64_t reserved_base, uint64_t reserved_size,
     const struct polaris_mdt_blob *split, uint32_t split_count,
     uint8_t *output, size_t output_size);
+int polaris_mdt_metadata(const uint8_t *image, size_t image_size,
+    const struct polaris_mdt_blob *split, uint32_t split_count,
+    uint8_t *output, size_t output_size, size_t *written);
 
 #endif

@@ -37,6 +37,20 @@ def fixture(relocate=True, second_address=0x3000, file_size=4):
         (1, 0x2000, 0, second_address, 0, 16, flags, 0x1000)))
 
 
+def metadata_fixture(layout='packed'):
+    data = bytearray(fixture())
+    struct.pack_into('<I', data, 52 + 16, len(data))
+    struct.pack_into('<I', data, 52 + 24, 0x07000000)
+    struct.pack_into('<8I', data, 84, 0, 0x1000, 0, 0, 8, 8, 0x02000000, 0)
+    header = bytes(data)
+    hashes = b'HASHDATA'
+    if layout == 'packed':
+        data += hashes
+    elif layout == 'embedded':
+        data += bytes(0x1000 - len(data)) + hashes
+    return bytes(data), header + hashes
+
+
 class PolarisMDTTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -54,6 +68,9 @@ class PolarisMDTTests(unittest.TestCase):
         cls.lib.polaris_mdt_stage.argtypes = [
             C.POINTER(U8), C.c_size_t, C.c_uint64, C.c_uint64,
             C.POINTER(Blob), C.c_uint32, C.POINTER(U8), C.c_size_t]
+        cls.lib.polaris_mdt_metadata.argtypes = [
+            C.POINTER(U8), C.c_size_t, C.POINTER(Blob), C.c_uint32,
+            C.POINTER(U8), C.c_size_t, C.POINTER(C.c_size_t)]
 
     def plan(self, data, base=0x8e400000, size=0x7800000):
         source = (U8 * len(data)).from_buffer_copy(data)
@@ -135,6 +152,77 @@ class PolarisMDTTests(unittest.TestCase):
         self.assertLess(self.lib.polaris_mdt_stage(
             meta, len(data), 0x8e400000, len(output), blobs, 3, output, len(output)), 0)
         self.assertTrue(all(v == 0xa5 for v in output))
+
+    def metadata(self, data, blobs=None, capacity=256):
+        source = (U8 * len(data)).from_buffer_copy(data)
+        output = (U8 * capacity)(*([0xa5] * capacity))
+        written = C.c_size_t(0xbeef)
+        status = self.lib.polaris_mdt_metadata(
+            source, len(data), blobs, len(blobs) if blobs is not None else 0,
+            output, capacity, C.byref(written))
+        return status, bytes(output), written.value
+
+    def test_auth_metadata_packed_and_embedded_have_no_padding(self):
+        for layout in ('packed', 'embedded'):
+            data, expected = metadata_fixture(layout)
+            status, output, written = self.metadata(data)
+            self.assertEqual(status, 0)
+            self.assertEqual(written, len(expected))
+            self.assertEqual(output[:written], expected)
+            self.assertEqual(output[written:], b'\xa5' * (len(output) - written))
+
+    def test_auth_metadata_split_hash_and_size_query(self):
+        data, expected = metadata_fixture('split')
+        hashes = (U8 * 8).from_buffer_copy(b'HASHDATA')
+        blobs = (Blob * 3)()
+        blobs[1] = Blob(hashes, 8)
+        status, output, written = self.metadata(data, blobs)
+        self.assertEqual((status, output[:written]), (0, expected))
+        source = (U8 * len(data)).from_buffer_copy(data)
+        size = C.c_size_t()
+        self.assertEqual(self.lib.polaris_mdt_metadata(
+            source, len(data), blobs, 3, None, 0, C.byref(size)), 0)
+        self.assertEqual(size.value, len(expected))
+
+    def test_auth_metadata_rejects_ambiguous_headers_without_writes(self):
+        data, _ = metadata_fixture()
+        cases = [data[:-1], data[:51]]
+        for offset, value in ((52, 1), (56, 4), (68, 52), (76, 0x02000000), (100, 0),
+                              (108, 0), (140, 0x02000000)):
+            bad = bytearray(data)
+            struct.pack_into('<I', bad, offset, value)
+            cases.append(bad)
+        for bad in cases:
+            status, output, written = self.metadata(bad)
+            self.assertLess(status, 0)
+            self.assertEqual(output, b'\xa5' * len(output))
+            self.assertEqual(written, 0xbeef)
+
+    def test_auth_metadata_capacity_and_split_truncation(self):
+        data, expected = metadata_fixture()
+        status, output, written = self.metadata(data, capacity=len(expected) - 1)
+        self.assertLess(status, 0)
+        self.assertEqual((output, written), (b'\xa5' * len(output), 0xbeef))
+        data, _ = metadata_fixture('split')
+        hashes = (U8 * 7)(*range(7))
+        blobs = (Blob * 3)()
+        blobs[1] = Blob(hashes, 7)
+        self.assertLess(self.metadata(data, blobs)[0], 0)
+
+    def test_auth_metadata_rejects_output_or_length_alias(self):
+        data, _ = metadata_fixture()
+        storage = (U8 * 512)()
+        C.memmove(storage, data, len(data))
+        original = bytes(storage)
+        written = C.c_size_t(0xbeef)
+        self.assertLess(self.lib.polaris_mdt_metadata(
+            storage, len(data), None, 0, storage, 512, C.byref(written)), 0)
+        self.assertEqual((bytes(storage), written.value), (original, 0xbeef))
+        source = (U8 * len(data)).from_buffer_copy(data)
+        alias = C.cast(storage, C.POINTER(C.c_size_t))
+        self.assertLess(self.lib.polaris_mdt_metadata(
+            source, len(data), None, 0, storage, 512, alias), 0)
+        self.assertEqual(bytes(storage), original)
 
 
 if __name__ == '__main__':

@@ -79,6 +79,61 @@ static int overlaps_output(const void *data, size_t size,
     return size && a < b + output_size && b < a + size;
 }
 
+int polaris_mdt_metadata(const uint8_t *image, size_t image_size,
+    const struct polaris_mdt_blob *split, uint32_t split_count,
+    uint8_t *output, size_t output_size, size_t *written)
+{
+    if (!image || !written || image_size < 52 || (split_count && !split) ||
+        split_count > 100 || (!output && output_size) ||
+        memcmp(image, "\177ELF\1\1\1", 7) ||
+        u16(image + 16) != 2 || u16(image + 18) != 164 ||
+        u32(image + 20) != 1 || u16(image + 40) != 52 ||
+        u16(image + 42) != 32) return -1;
+    uint32_t table = u32(image + 28), count = u16(image + 44);
+    if (count < 2 || count > 100 || table < 52 || table > image_size ||
+        (uint64_t)count * 32 > image_size - table) return -1;
+    const uint8_t *first = image + table;
+    uint32_t header_size = u32(first + 16), hash_index = 0;
+    if (u32(first) == 1 || u32(first + 4) != 0 ||
+        ((u32(first + 24) >> 24) & 7u) == 2 ||
+        header_size < (uint64_t)table + count * 32 ||
+        header_size > image_size) return -1;
+    for (uint32_t i = 1; i < count; ++i) {
+        if (((u32(image + table + i * 32 + 24) >> 24) & 7u) != 2) continue;
+        if (hash_index) return -1;
+        hash_index = i;
+    }
+    if (!hash_index) return -1;
+    const uint8_t *hash_header = image + table + hash_index * 32;
+    uint32_t hash_size = u32(hash_header + 16), offset = u32(hash_header + 4);
+    uint64_t total = (uint64_t)header_size + hash_size;
+    if (!hash_size || total > SIZE_MAX) return -1;
+    const uint8_t *hash;
+    if (image_size == total) {
+        hash = image + header_size;
+    } else if (offset < image_size) {
+        if (offset < header_size || hash_size > image_size - offset) return -1;
+        hash = image + offset;
+    } else {
+        if (hash_index >= split_count || !split[hash_index].data ||
+            split[hash_index].size != hash_size) return -1;
+        hash = split[hash_index].data;
+    }
+    if (overlaps_output(image, image_size, (const uint8_t *)written, sizeof(*written)) ||
+        overlaps_output(hash, hash_size, (const uint8_t *)written, sizeof(*written)))
+        return -1;
+    if (output) {
+        if (output_size < total ||
+            overlaps_output(image, image_size, output, output_size) ||
+            overlaps_output(hash, hash_size, output, output_size) ||
+            overlaps_output(written, sizeof(*written), output, output_size)) return -1;
+        memcpy(output, image, header_size);
+        memcpy(output + header_size, hash, hash_size);
+    }
+    *written = (size_t)total;
+    return 0;
+}
+
 int polaris_mdt_stage(const uint8_t *metadata, size_t metadata_size,
     uint64_t reserved_base, uint64_t reserved_size,
     const struct polaris_mdt_blob *split, uint32_t split_count,
