@@ -2,6 +2,10 @@
 #define POLARIS_HFI_H
 
 #include <stdint.h>
+#include <stddef.h>
+
+#define PHFI_REGION_BYTES 16384u
+#define PHFI_QUEUE_WORDS 1024u
 
 enum polaris_hfi_result {
     PHFI_OK = 0,
@@ -37,6 +41,8 @@ struct polaris_hfi_transport {
     int (*faulted)(void *);
 };
 
+int polaris_hfi_region_build(uint8_t *scratch, size_t size, uint64_t iova);
+int polaris_hfi_region_check(const uint8_t *snapshot, size_t size, uint64_t iova);
 int polaris_hfi_command(uint32_t id, uint32_t sequence,
     const uint32_t *payload, uint32_t payload_words,
     uint32_t *output, uint32_t output_capacity);

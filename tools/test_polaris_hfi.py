@@ -1,6 +1,7 @@
 import ctypes as C
 from pathlib import Path
 import random
+import struct
 import subprocess
 import sys
 import tempfile
@@ -51,6 +52,58 @@ class PolarisHFITests(unittest.TestCase):
         cls.lib.polaris_hfi_exchange.argtypes = [
             C.POINTER(Channel), C.POINTER(Transport), U32, ptr, U32,
             ptr, U32, ptr, ptr, U32]
+        cls.lib.polaris_hfi_region_build.argtypes = [
+            C.POINTER(C.c_uint8), C.c_size_t, C.c_uint64]
+        cls.lib.polaris_hfi_region_check.argtypes = [
+            C.POINTER(C.c_uint8), C.c_size_t, C.c_uint64]
+
+    def region(self, base=0x60000000):
+        data = (C.c_uint8 * 16400)(*([0xa5] * 16400))
+        self.assertEqual(self.lib.polaris_hfi_region_build(data, len(data), base), 0)
+        return data
+
+    def test_v1_region_has_exact_table_and_queue_ids(self):
+        data = self.region()
+        self.assertEqual(struct.unpack_from('<6I', data), (0, 168, 6, 12, 3, 3))
+        for q, ident in enumerate((0, 4, 5)):
+            self.assertEqual(struct.unpack_from('<12I', data, 24 + q * 48),
+                (1, 0x60001000 + q * 4096, 0xa00 | ident, 1024, 0, 0, 1, 1, 1, 0, 0, 0))
+        self.assertEqual(bytes(data[168:16384]), bytes(16384 - 168))
+        self.assertEqual(bytes(data[16384:]), b'\xa5' * 16)
+        self.assertEqual(self.lib.polaris_hfi_region_check(data, len(data), 0x60000000), 0)
+
+    def test_v1_region_rejects_bad_mapping_without_partial_writes(self):
+        for base, size in ((0, 16384), (1, 16384), (0xffffd000, 16384),
+                           (0x100000000, 16384), (0x60000000, 16383)):
+            data = (C.c_uint8 * 16384)(*([0xa5] * 16384))
+            self.assertEqual(self.lib.polaris_hfi_region_build(data, size, base), -1)
+            self.assertEqual(bytes(data), b'\xa5' * len(data))
+        data = self.region(0xffffc000)
+        self.assertEqual(struct.unpack_from('<I', data, 24 + 2 * 48 + 4)[0], 0xfffff000)
+        self.assertEqual(self.lib.polaris_hfi_region_check(data, len(data), 0xffffc000), 0)
+
+    def test_v1_region_rejects_changed_layout_without_following_offsets(self):
+        for word in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 13):
+            data = self.region()
+            struct.pack_into('<I', data, word * 4, 0xffffffff)
+            before = bytes(data)
+            self.assertEqual(self.lib.polaris_hfi_region_check(data, len(data), 0x60000000), -2)
+            self.assertEqual(bytes(data), before)
+
+    def test_v1_region_bounds_firmware_indices_and_request_flags(self):
+        for queue in range(3):
+            for field, value in ((8, 2), (9, 2), (10, 1024), (11, 0xffffffff)):
+                data = self.region()
+                struct.pack_into('<I', data, 24 + queue * 48 + field * 4, value)
+                self.assertEqual(self.lib.polaris_hfi_region_check(data, len(data), 0x60000000), -2)
+
+    def test_v1_region_allows_dynamic_counters_indices_and_ring_contents(self):
+        data = self.region()
+        for queue in range(3):
+            for field, value in ((5, 0xffffffff), (8, 0), (9, 1), (10, 1023), (11, 511)):
+                struct.pack_into('<I', data, 24 + queue * 48 + field * 4, value)
+        data[4096] = data[16383] = 255
+        self.assertEqual(self.lib.polaris_hfi_region_check(data, len(data), 0x60000000), 0)
 
     def command(self, ident=1, seq=7, payload=(0x12345678,)):
         source = (U32 * len(payload))(*payload)

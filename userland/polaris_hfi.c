@@ -1,4 +1,69 @@
 #include "polaris_hfi.h"
+#include <string.h>
+
+static int region_arguments(const uint8_t *buffer, size_t size, uint64_t iova)
+{
+    return buffer && size >= PHFI_REGION_BYTES && iova && !(iova & 4095u) &&
+        iova <= (uint64_t)UINT32_MAX - (PHFI_REGION_BYTES - 1);
+}
+
+static uint32_t region_word(const uint8_t *data, uint32_t index)
+{
+    const uint8_t *p = data + index * 4;
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+        ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static void region_set_word(uint8_t *data, uint32_t index, uint32_t value)
+{
+    for (uint32_t byte = 0; byte < 4; ++byte)
+        data[index * 4 + byte] = (uint8_t)(value >> (byte * 8));
+}
+
+int polaris_hfi_region_build(uint8_t *scratch, size_t size, uint64_t iova)
+{
+    if (!region_arguments(scratch, size, iova)) return PHFI_INVALID;
+    memset(scratch, 0, PHFI_REGION_BYTES);
+    const uint32_t table[] = {0, 168, 6, 12, 3, 3};
+    const uint32_t ids[] = {0, 4, 5};
+    for (uint32_t i = 0; i < 6; ++i) region_set_word(scratch, i, table[i]);
+    for (uint32_t queue = 0; queue < 3; ++queue) {
+        uint32_t header = 6 + queue * 12;
+        region_set_word(scratch, header, 1);
+        region_set_word(scratch, header + 1, (uint32_t)(iova + (queue + 1) * 4096));
+        region_set_word(scratch, header + 2, (10u << 8) | ids[queue]);
+        region_set_word(scratch, header + 3, PHFI_QUEUE_WORDS);
+        region_set_word(scratch, header + 6, 1);
+        region_set_word(scratch, header + 7, 1);
+        region_set_word(scratch, header + 8, 1);
+    }
+    return PHFI_OK;
+}
+
+int polaris_hfi_region_check(const uint8_t *snapshot, size_t size, uint64_t iova)
+{
+    if (!region_arguments(snapshot, size, iova)) return PHFI_INVALID;
+    const uint32_t table[] = {0, 168, 6, 12, 3, 3};
+    const uint32_t ids[] = {0, 4, 5};
+    for (uint32_t i = 0; i < 6; ++i)
+        if (region_word(snapshot, i) != table[i]) return PHFI_PROTOCOL;
+    for (uint32_t queue = 0; queue < 3; ++queue) {
+        uint32_t header = 6 + queue * 12;
+        if (region_word(snapshot, header) != 1 ||
+            region_word(snapshot, header + 1) != iova + (queue + 1) * 4096 ||
+            region_word(snapshot, header + 2) != ((10u << 8) | ids[queue]) ||
+            region_word(snapshot, header + 3) != PHFI_QUEUE_WORDS ||
+            region_word(snapshot, header + 4) != 0 ||
+            region_word(snapshot, header + 6) != 1 ||
+            region_word(snapshot, header + 7) != 1 ||
+            region_word(snapshot, header + 8) > 1 ||
+            region_word(snapshot, header + 9) > 1 ||
+            region_word(snapshot, header + 10) >= PHFI_QUEUE_WORDS ||
+            region_word(snapshot, header + 11) >= PHFI_QUEUE_WORDS)
+            return PHFI_PROTOCOL;
+    }
+    return PHFI_OK;
+}
 
 static uint32_t message_words(uint32_t header)
 {
