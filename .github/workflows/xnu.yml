@@ -7,7 +7,7 @@ on:
         description: macOS release whose xnu to build (13.5 = xnu-8796, iOS 16 era)
         default: "13.5"
       kernel_config:
-        description: RELEASE / DEVELOPMENT / DEBUG / PREVIEW_ONLY / DRIVER_FOUNDATIONS
+        description: RELEASE / DEVELOPMENT / DEBUG / PREVIEW_ONLY / DRIVER_FOUNDATIONS / MAINTENANCE_ONLY
         default: DEVELOPMENT
       machine_config:
         description: xnu MACHINE_CONFIG
@@ -34,7 +34,7 @@ env:
 
 jobs:
   build:
-    if: ${{ inputs.kernel_config != 'PREVIEW_ONLY' && inputs.kernel_config != 'DRIVER_FOUNDATIONS' }}
+    if: ${{ inputs.kernel_config != 'PREVIEW_ONLY' && inputs.kernel_config != 'DRIVER_FOUNDATIONS' && inputs.kernel_config != 'MAINTENANCE_ONLY' }}
     # macos-14 was retired on 2026-11-02. Use Intel macOS 15 and select its
     # oldest Xcode below; 0095 adds the IORPC.kernelContent ABI used by Xcode 16 iig.
     runs-on: macos-15-intel
@@ -125,7 +125,7 @@ jobs:
           if-no-files-found: warn
 
   poster-maintenance:
-    if: ${{ inputs.kernel_config == 'RELEASE' }}
+    if: ${{ inputs.kernel_config == 'RELEASE' || inputs.kernel_config == 'MAINTENANCE_ONLY' }}
     runs-on: macos-15-intel
     timeout-minutes: 20
     steps:

@@ -16,8 +16,12 @@ STUBS = r'''
 #include <fcntl.h>
 #define ARM64_BOARD_CONFIG_SWEET 1
 #define kSuccess 0
+#ifndef FREAD
 #define FREAD 1
+#endif
+#ifndef FWRITE
 #define FWRITE 2
+#endif
 #define UIO_READ 0
 #define UIO_WRITE 1
 #define UIO_SYSSPACE 0
