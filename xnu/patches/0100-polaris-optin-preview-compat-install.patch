@@ -1,0 +1,205 @@
+--- /dev/null
++++ b/bsd/dev/polaris_preview_install.c
+@@ -0,0 +1,177 @@
++/* Optional, board-gated VFS installer for the scoped preview compatibility.
++ * Default is off. Files are supplied in reserved boot payload blobs, never
++ * downloaded by the kernel. Only the dedicated PosterBoard paths below can
++ * be written; original bytes must match before any changes. Restore uses
++ * the same original blob with polarispreview=2.
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <sys/errno.h>
++#include <sys/fcntl.h>
++#include <sys/uio.h>
++#include <sys/vnode.h>
++#include <kern/kalloc.h>
++#include <machine/machine_routines.h>
++#include <pexpert/pexpert.h>
++#include <pexpert/device_tree.h>
++
++extern bool polaris_touch_i2c_board(void);
++void polaris_preview_install(void);
++
++#define PP_PROGRAM "/Applications/PosterBoard.app/PosterBoard"
++#define PP_BACKUP "/Applications/PosterBoard.app/PosterBoard.polaris-original"
++#define PP_LIBRARY "/Applications/PosterBoard.app/PolarisPreviewCompat.dylib"
++#define PP_MAX_BLOB (512u * 1024u)
++
++struct pp_blob { const uint8_t *bytes; uint32_t size; };
++
++static bool
++pp_u64(DTEntry node, const char *key, uint64_t *value)
++{
++    const void *p = NULL;
++    unsigned int length = 0;
++    if (SecureDTGetProperty(node, key, &p, &length) != kSuccess ||
++        p == NULL || length != sizeof(*value)) return false;
++    memcpy(value, p, sizeof(*value));
++    return true;
++}
++
++static bool
++pp_blob_get(const char *name, struct pp_blob *blob)
++{
++    DTEntry chosen, map;
++    const void *p = NULL;
++    unsigned int length = 0;
++    uint64_t base, memory_size, pair[2];
++    if (SecureDTLookupEntry(NULL, "/chosen", &chosen) != kSuccess ||
++        SecureDTLookupEntry(NULL, "/chosen/memory-map", &map) != kSuccess ||
++        !pp_u64(chosen, "dram-base", &base) ||
++        !pp_u64(chosen, "dram-size", &memory_size) ||
++        base + memory_size < base ||
++        SecureDTGetProperty(map, name, &p, &length) != kSuccess ||
++        p == NULL || length != sizeof(pair)) return false;
++    memcpy(pair, p, sizeof(pair));
++    if ((pair[0] & 0x3fffull) || pair[1] == 0 || pair[1] > PP_MAX_BLOB ||
++        pair[0] < base || pair[0] + pair[1] < pair[0] ||
++        pair[0] + pair[1] > base + memory_size) return false;
++    vm_offset_t address = ml_static_ptovirt((vm_offset_t)pair[0]);
++    if (address == 0) return false;
++    blob->bytes = (const uint8_t *)address;
++    blob->size = (uint32_t)pair[1];
++    return true;
++}
++
++static bool
++pp_macho(const struct pp_blob *blob, uint32_t type)
++{
++    uint32_t header[4];
++    if (blob->size < 32) return false;
++    memcpy(header, blob->bytes, sizeof(header));
++    return header[0] == 0xfeedfacfu && header[1] == 0x0100000cu && header[3] == type;
++}
++
++static int
++pp_compare(const char *path, const struct pp_blob *blob, bool *equal)
++{
++    vfs_context_t ctx = vfs_context_kernel();
++    vnode_t vp = NULLVP;
++    *equal = false;
++    int error = vnode_open(path, FREAD, 0, 0, &vp, ctx);
++    if (error) return error;
++    struct vnode_attr attr;
++    VATTR_INIT(&attr);
++    VATTR_WANTED(&attr, va_data_size);
++    error = vnode_getattr(vp, &attr, ctx);
++    if (!error && attr.va_data_size == blob->size) {
++        uint8_t *buffer = kalloc_data(blob->size, Z_WAITOK);
++        if (buffer == NULL) {
++            error = ENOMEM;
++        } else {
++            int residual = 0;
++            error = vn_rdwr(UIO_READ, vp, (caddr_t)buffer, (int)blob->size,
++                0, UIO_SYSSPACE, 0, vfs_context_ucred(ctx), &residual, vfs_context_proc(ctx));
++            if (!error && residual == 0) *equal = memcmp(buffer, blob->bytes, blob->size) == 0;
++            if (!error && residual != 0) error = EIO;
++            kfree_data(buffer, blob->size);
++        }
++    }
++    int closed = vnode_close(vp, FREAD, ctx); /* drops both acquired references */
++    return error ? error : closed;
++}
++
++static int
++pp_write(const char *path, const struct pp_blob *blob, bool exclusive)
++{
++    vfs_context_t ctx = vfs_context_kernel();
++    vnode_t vp = NULLVP;
++    int flags = FWRITE | O_CREAT | (exclusive ? O_EXCL : O_TRUNC);
++    int error = vnode_open(path, flags, 0755, 0, &vp, ctx);
++    if (error) return error;
++    int residual = 0;
++    error = vn_rdwr(UIO_WRITE, vp, (caddr_t)blob->bytes, (int)blob->size,
++        0, UIO_SYSSPACE, IO_SYNC | IO_UNIT, vfs_context_ucred(ctx), &residual, vfs_context_proc(ctx));
++    if (!error && residual != 0) error = EIO;
++    int closed = vnode_close(vp, FWRITE, ctx);
++    if (!error) error = closed;
++    bool same = false;
++    if (!error) error = pp_compare(path, blob, &same);
++    if (!error && !same) error = EIO;
++    return error;
++}
++
++void
++polaris_preview_install(void)
++{
++    int optin = 0;
++    if (!polaris_touch_i2c_board()) return;
++    (void)PE_parse_boot_argn("polarispreview", &optin, sizeof(optin));
++    if (optin != 1 && optin != 2) return;
++    struct pp_blob original, patched, library;
++    if (!pp_blob_get("PolarisPreviewOriginal", &original) ||
++        !pp_blob_get("PolarisPreviewProgram", &patched) ||
++        !pp_macho(&original, 2) || !pp_macho(&patched, 2) ||
++        original.size != patched.size ||
++        memcmp(original.bytes, patched.bytes, original.size) == 0) {
++        printf("POLARIS PREVIEW: invalid/missing original or patched program; no writes\n");
++        return;
++    }
++    bool is_original = false, is_patched = false;
++    int error = pp_compare(PP_PROGRAM, &original, &is_original);
++    if (!error && !is_original) error = pp_compare(PP_PROGRAM, &patched, &is_patched);
++    if (error || (!is_original && !is_patched)) {
++        if (!error) error = EINVAL;
++        printf("POLARIS PREVIEW: current program not recognized (%d); no writes\n", error);
++        return;
++    }
++    if (optin == 2) {
++        error = is_original ? 0 : pp_write(PP_PROGRAM, &original, false);
++        printf("POLARIS PREVIEW: restore original result %d\n", error);
++        return;
++    }
++    if (!pp_blob_get("PolarisPreviewLibrary", &library) || !pp_macho(&library, 6)) {
++        printf("POLARIS PREVIEW: invalid/missing library; no writes\n");
++        return;
++    }
++    bool backup_ok = false;
++    error = pp_compare(PP_BACKUP, &original, &backup_ok);
++    if (error == ENOENT) {
++        error = pp_write(PP_BACKUP, &original, true);
++        backup_ok = error == 0;
++    }
++    if (error || !backup_ok) {
++        if (!error) error = EEXIST;
++        printf("POLARIS PREVIEW: original backup failed (%d); program unchanged\n", error);
++        return;
++    }
++    error = pp_write(PP_LIBRARY, &library, false);
++    if (!error && !is_patched) error = pp_write(PP_PROGRAM, &patched, false);
++    if (error) {
++        int restored = pp_write(PP_PROGRAM, &original, false);
++        printf("POLARIS PREVIEW: install failed %d; original restore result %d\n", error, restored);
++        return;
++    }
++    printf("POLARIS PREVIEW: installed scoped library %u bytes and program %u bytes; original backup verified\n",
++        library.size, patched.size);
++}
++#endif
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -116,6 +116,7 @@
+ bsd/dev/polaris_gpu_diag.c		standard
+ bsd/dev/polaris_gpu.c			standard
+ bsd/dev/polaris_keys.c			standard
++bsd/dev/polaris_preview_install.c	standard
+ bsd/dev/mem.c				standard
+ bsd/dev/munge.c 			optional config_requires_u32_munging
+ bsd/dev/unix_startup.c			standard
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -1098,6 +1098,12 @@
+ 
+ 	bsd_init_kprintf("bsd_do_post - done");
+ 
++
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	/* Root is mounted; use ordinary VFS I/O before any application starts. */
++	extern void polaris_preview_install(void);
++	polaris_preview_install();
++#endif
+ 	load_init_program(p);
+ 	lock_trace = 1;
+ }
