@@ -149,7 +149,7 @@ jobs:
           otool -L maintenance-out/polaris-poster-maintenance
           xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 \
             -isysroot "$SDK" -std=c11 -Wall -Wextra -Werror -dynamiclib \
-            userland/polaris_hfi.c userland/polaris_mdt.c userland/polaris_mss.c \
+            userland/polaris_hfi.c userland/polaris_mdt.c userland/polaris_mss.c userland/polaris_bt_h4.c \
             -Wl,-install_name,/usr/local/lib/libPolarisBringup.dylib \
             -o maintenance-out/libPolarisBringup.dylib
           codesign --force --sign - maintenance-out/libPolarisBringup.dylib
@@ -177,7 +177,7 @@ jobs:
           mkdir -p foundations-out
           xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 \
             -isysroot "$SDK" -std=c11 -Wall -Wextra -Werror -dynamiclib \
-            userland/polaris_hfi.c userland/polaris_mdt.c userland/polaris_mss.c \
+            userland/polaris_hfi.c userland/polaris_mdt.c userland/polaris_mss.c userland/polaris_bt_h4.c \
             -Wl,-install_name,/usr/local/lib/libPolarisBringup.dylib \
             -o foundations-out/libPolarisBringup.dylib
           codesign --force --sign - foundations-out/libPolarisBringup.dylib
