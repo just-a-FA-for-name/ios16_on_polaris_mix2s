@@ -1,3 +1,14 @@
+## CURRENT 2026-11-06：32MiB修复内核已临时启动，等待实机结果（本节优先）
+
+- CI42208721325成功，源码8f0c3d15d25a6f956d16d5d0261a25ecfaeb955a。导入遗漏的Dipper osfmk/arm/io_map.c32MiB窗口，包含2649e92逐操作检查点及空映射处理。旧8MiB自动GPU版和延迟探测版均无法进入系统；同一旧内核GPU-off对照可进入。新修复尚未收到实机反馈，不能宣称GPU/流畅度已修复。
+- 旧boot021是boot020的完全相同陈旧日志；boot022为新的GPU-off日志250720B；boot023为新的延迟probe日志30326B/flush10，确认waiting20s但最后落盘未到step1。未落盘尾部不能被当作没有执行，不能硬说某个寄存器已被定位。
+- 新kernel12489208B SHA256 ba94d1d709a619c8d86d9d58c71c9eac7322d7f33bc48263b56c51f38c7f04e1。out/ci-42208721325保存匹配artifact、logs、Build.txt、CI-SHA256SUMS和验证报告，实际GPU各编译单元/代码标记及CI哈希通过。
+- 临时镜像out/ci-42208721325/shim-polaris-dipper-checkpoint.img18333696B SHA256 c86fd4406bf0b86fe3dbc81a23abaed7700decd7a75298d8e842442617c5e0be。保留CPU8/约5.2GiB/完整显示/60Hz目标/三键/四个本机固件。gpu=0 mi8gpu=21 mi8gpu_delay=20 ufslogsecs=1 mi8gpu_trace_ms=2000实际运行21步硬件探测；不是GPU-off对照，但此诊断路径结束会teardown，不等于桌面接管或auto selftest。
+- 独立解包、四个固件逐字节/保留地址/16KiB对齐/内存界限/ABL余量2553632B全部通过，见dipper-preflight.json。重新核实product=polaris和镜像SHA后，fastboot临时Sending/BootingOKAY，无flash。
+- CURRENT PHONE：刚临时加载此32MiB+检查点镜像。已请用户等约3分钟（各检查点刻意停2秒），反馈锁屏/桌面/先显示后卡住，然后回FASTBOOT。下一步临时TWRP取唯一新名boot-024-dipper-checkpoint，核实checkpoint、GCC/GPUCC映射、各step/HFI/fence/teardown，先排除日志陈旧。
+- Mesa/EAGL/AIR此前已本地编译并校验，保存在out/dipper-userland-20261106，未安装或接管桌面；当前iOS16.7.16与donor16.5的vtable地址/部分槽位不同，private ABI inventory已保存。Wi-Fi/Bluetooth仍未适配成功，用户明确非常不满意现有严重卡顿。继续补真实驱动，不回到裁切/低帧/关功能路线。
+- 原boot仍HyperOS，userdata已iOS，禁止普通启动Android/格式化data。回退及备份保留。禁止子Agent。大文件均在F盘。下面旧章节均属历史，优先此状态。
+
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
 ## CURRENT 2026-11-06 resume: Dipper GPU link fix building; Mesa/EAGL compiled locally
