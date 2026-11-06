@@ -61,7 +61,7 @@ diff --git a/bsd/dev/mi8_adreno.c b/bsd/dev/mi8_adreno.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/mi8_adreno.c
-@@ -0,0 +1,4821 @@
+@@ -0,0 +1,4853 @@
 +/*
 + * The GPU of the Xiaomi Mi 8 (dipper, SDM845): an Adreno 630 (chip id 0x06030001, "qcom,chipid" of the phone's
 + * own device tree), woken step by step. Only with boot-arg mi8gpu=N, which performs steps 1 to N and stops.
@@ -987,7 +987,13 @@ new file mode 100644
 +	uint64_t par;
 +
 +	*phys = 0;
-+	printf("mi8gpu: ATOS request %#llx at CB%u+0x800\n", iova, ctx);
++	/* boot-025: 13 pages x 2 lines of ATOS text was painted over the desktop by
++	 * the framebuffer console. Keep the diagnostic available, but off by default. */
++	uint32_t verbose = 0;
++	(void)PE_parse_boot_argn("mi8gpu_atos_verbose", &verbose, sizeof(verbose));
++	if (verbose) {
++		printf("mi8gpu: ATOS request %#llx at CB%u+0x800\n", iova, ctx);
++	}
 +	__asm__ volatile ("str %0, [%1]" : : "r" (iova & ~0xfffull), "r" (cb + CB_ATS1PR) : "memory");
 +	__asm__ volatile ("dsb sy");
 +	for (int i = 0; i < 100 && (rd(cb + CB_ATSR) & 1); i++) {
@@ -998,7 +1004,9 @@ new file mode 100644
 +		return SMMU_TIMEOUT;
 +	}
 +	__asm__ volatile ("ldr %0, [%1]" : "=r" (par) : "r" (cb + CB_PAR) : "memory");
-+	printf("mi8gpu: ATOS result %#llx PAR %#llx\n", iova, par);
++	if (verbose) {
++		printf("mi8gpu: ATOS result %#llx PAR %#llx\n", iova, par);
++	}
 +	if (par & 1) {
 +		printf("mi8gpu:   %#llx: the SMMU refuses it (PAR %#llx)\n", iova, par);
 +		return SMMU_FAULT;
@@ -1292,6 +1300,7 @@ new file mode 100644
 +{
 +	uint64_t *l1, *l2, *l3, root, phys, expected;
 +	vm_offset_t cb = smmu_cb(G3D_CTX);
++	polaris_gpu_checkpoint("g3d: enter");
 +	uint32_t wrong = 0, pages = 0, smr_value = SMMU_SMR_VALID | G3D_STREAM;
 +	uint64_t fw_size = 0;
 +	const uint8_t *fw = redwood_wifi_file("a630_sqe.fw", &fw_size);
@@ -1309,6 +1318,7 @@ new file mode 100644
 +	}
 +	printf("mi8gpu: a630_sqe.fw: %llu bytes, first words %08x %08x %08x %08x\n", fw_size, ((const uint32_t *)fw)[0],
 +	    ((const uint32_t *)fw)[1], ((const uint32_t *)fw)[2], ((const uint32_t *)fw)[3]);
++	polaris_gpu_checkpoint("g3d: before table allocation");
 +	if (kmem_alloc(kernel_map, &g3d_tables, round_page(G3D_TABLE_POOL), KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
 +		return false;
 +	}
@@ -1323,6 +1333,7 @@ new file mode 100644
 +			return false;
 +		}
 +	}
++	polaris_gpu_checkpoint("g3d: allocations done");
 +	memcpy((void *)g3d_regions[0].memory, fw + G3D_SQE_FILE_SKIP, fw_size - G3D_SQE_FILE_SKIP);
 +	l1 = (uint64_t *)g3d_tables;
 +	l2 = (uint64_t *)(g3d_tables + 0x1000);
@@ -1359,6 +1370,7 @@ new file mode 100644
 +		printf("mi8gpu: the 3D core will see %#llx..%#llx (%s) in memory at %#llx\n", g->address, g->address + g->size - 1,
 +		    g->name, g->memory ? kvtophys(g->memory) : g->phys);
 +	}
++	polaris_gpu_checkpoint("g3d: page tables built");
 +	to_memory(g3d_tables, round_page(G3D_TABLE_POOL));
 +	g3d_old.smr = rd(smmu + SMMU_SMR(G3D_SMR_ENTRY));
 +	g3d_old.s2cr = rd(smmu + SMMU_S2CR(G3D_SMR_ENTRY));
@@ -1375,6 +1387,7 @@ new file mode 100644
 +	g3d_old.mair1 = rd(cb + CB_MAIR1);
 +	g3d_old.saved = true;
 +
++	polaris_gpu_checkpoint("g3d: before context writes");
 +	root |= (uint64_t)G3D_CTX << 48;
 +	wr(cb + CB_SCTLR, 0);
 +	wr(smmu + SMMU_CBA2R(G3D_CTX), CBA2R_64_BIT);
@@ -1396,6 +1409,7 @@ new file mode 100644
 +	wr(cb + CB_SCTLR, SCTLR_ON);
 +	wr(smmu + SMMU_S2CR(G3D_SMR_ENTRY), G3D_CTX);
 +	wr(smmu + SMMU_SMR(G3D_SMR_ENTRY), smr_value);
++	polaris_gpu_checkpoint("g3d: context written");
 +	printf("mi8gpu: 3D core context bank %u: CBAR %#010x SCTLR %#010x TTBR0 %#010x%08x; entry %u SMR %#010x S2CR %#010x\n", G3D_CTX,
 +	    rd(smmu + SMMU_CBAR(G3D_CTX)), rd(cb + CB_SCTLR), rd(cb + CB_TTBR0_HI), rd(cb + CB_TTBR0_LO), G3D_SMR_ENTRY,
 +	    rd(smmu + SMMU_SMR(G3D_SMR_ENTRY)), rd(smmu + SMMU_S2CR(G3D_SMR_ENTRY)));
@@ -1405,6 +1419,7 @@ new file mode 100644
 +		return false;
 +	}
 +	for (uint32_t r = 0; r < G3D_REGIONS; r++) {
++	polaris_gpu_checkpoint("g3d: before ATOS checks");
 +		uint32_t prior = wrong;
 +
 +		for (uint32_t off = 0; off < g3d_regions[r].size; off += (g3d_regions[r].phys ? 0x1000 * 97 : 0x1000)) {
@@ -1416,17 +1431,21 @@ new file mode 100644
 +		}
 +		printf("mi8gpu: 3D %s: %u pages checked wrong%s\n", g3d_regions[r].name, wrong - prior, g3d_regions[r].phys ? " (every 97th page)" : "");
 +	}
-+	const uint64_t holes[] = { 0x10100000ull, 0x00001000ull };
-+	for (uint32_t h = 0; h < 2; h++) {
-+		enum smmu_translation result = smmu_translate_in(G3D_CTX, holes[h], &phys);
-+
-+		printf("mi8gpu: 3D unmapped %#llx: %s\n", holes[h],
-+		    result == SMMU_FAULT ? "explicit translation fault" : result == SMMU_TIMEOUT ? "TIMEOUT -- FAIL" : "TRANSLATED -- FAIL");
-+		if (result != SMMU_FAULT) {
-+			wrong++;
++	/* Same Polaris bus hang as step 12: opt-in only, not an ownership check. */
++	uint32_t holes_opt = 0;
++	if (PE_parse_boot_argn("mi8gpu_holes", &holes_opt, sizeof(holes_opt)) && holes_opt == 1) {
++		const uint64_t holes[] = { 0x10100000ull, 0x00001000ull };
++		for (uint32_t h = 0; h < 2; h++) {
++			enum smmu_translation result = smmu_translate_in(G3D_CTX, holes[h], &phys);
++			printf("mi8gpu: 3D unmapped %#llx: %s\n", holes[h],
++			    result == SMMU_FAULT ? "explicit translation fault" : result == SMMU_TIMEOUT ? "TIMEOUT -- FAIL" : "TRANSLATED -- FAIL");
++			if (result != SMMU_FAULT) {
++				wrong++;
++			}
 +		}
 +	}
 +	printf("mi8gpu: 3D core address space: %u pages, %u wrong; context fault status %#010x\n", pages, wrong, rd(cb + CB_FSR));
++	polaris_gpu_checkpoint("g3d: checks done");
 +	g3d_ready = wrong == 0;
 +	return g3d_ready;
 +}
@@ -1588,20 +1607,33 @@ new file mode 100644
 +	}
 +	printf("mi8gpu: %u of %u pages translated wrong\n", wrong, pages);
 +	polaris_gpu_checkpoint("s12: page translations done");
-+	const uint64_t holes[] = { 0x60100000ull, 0x00001000ull };
-+	for (uint32_t h = 0; h < 2; h++) {
-+		enum smmu_translation result = smmu_translate(holes[h], &phys);
-+		printf("mi8gpu: unmapped %#llx: %s\n", holes[h],
-+		    result == SMMU_FAULT ? "explicit translation fault" : result == SMMU_TIMEOUT ? "TIMEOUT -- FAIL" : "TRANSLATED -- FAIL");
-+		if (result != SMMU_FAULT) {
-+			wrong++;
++	polaris_gpu_checkpoint("s12: before unmapped-address probes");
++	/* boot-025 stopped immediately after the translation checks: the first ATOS
++	 * against an IOVA with no table entry never produced a line and the whole
++	 * machine went silent. This is a negative self-check, not an idle or
++	 * ownership precondition. Keep it opt-in instead of hanging the bus. */
++	uint32_t holes_opt = 0;
++	if (PE_parse_boot_argn("mi8gpu_holes", &holes_opt, sizeof(holes_opt)) && holes_opt == 1) {
++		const uint64_t holes[] = { 0x60100000ull, 0x00001000ull };
++		for (uint32_t h = 0; h < 2; h++) {
++			enum smmu_translation result = smmu_translate(holes[h], &phys);
++			printf("mi8gpu: unmapped %#llx: %s\n", holes[h],
++			    result == SMMU_FAULT ? "explicit translation fault" : result == SMMU_TIMEOUT ? "TIMEOUT -- FAIL" : "TRANSLATED -- FAIL");
++			if (result != SMMU_FAULT) {
++				wrong++;
++			}
 +		}
++	} else {
++		printf("mi8gpu: unmapped-address ATOS probes skipped on Polaris (bus hang, boot-025)\n");
 +	}
++	polaris_gpu_checkpoint("s12: before context fault read");
 +	printf("mi8gpu: context fault status %#010x, global %#010x\n", rd(cb + CB_FSR), rd(smmu + SMMU_SGFSR));
++	polaris_gpu_checkpoint("s12: before g3d branch");
 +	if (wrong == 0) {
 +		uint32_t want3d = 0;
 +
 +		if ((PE_parse_boot_argn("mi8gpu_3d", &want3d, sizeof(want3d)) && want3d) || gmu_last_step >= 20) {
++			polaris_gpu_checkpoint("s12: calling g3d_smmu_setup");
 +			return g3d_smmu_setup();
 +		}
 +	}

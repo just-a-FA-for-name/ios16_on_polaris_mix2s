@@ -1,3 +1,26 @@
+## 2026-11-06 20:58 续轮：step12 诊断版已编译、打包、临时上机；boot-025 待取（本节覆盖下方所有旧状态）
+
+用户要求继续、不停。本轮把上一轮纯诊断检查点真正做成内核并临时启动。**GPU/整体流畅度/Wi‑Fi/蓝牙仍未修好，未 flash，未宣布成功，未动 main 分支。** 禁止子Agent，大文件全在 F 盘。完整证据、工具链与接手点见 `../给下一个AI的交接.md` 同名章节。
+
+| 项 | 结果 |
+|---|---|
+| CI | `42215444839` success，head `646f7a08`（实验分支 `ci-fork/polaris-dipper-gpu-20261106`），RELEASE，约 15 分钟 |
+| 内核 | `12505592B`，SHA `3191b5c2eb064dbfeb9ddc901f96267a921844cacbcebb4a18aa0d582d306b51`；`s12 idle: enter` / `s12: before first SMMU write` / `s12: page translations done` 等 18 个检查点字符串均在 Mach-O 内；`prepare_dipper_artifacts.py` 确认 5 个 GPU 编译单元实际编入 |
+| 镜像 | `out/ci-42215444839/shim-polaris-dipper-checkpoint.img` `18333696B`，SHA `8cc2a0708943728308df76527403bec58920b0bf36e1ae912c25bd8482c24985`；payload SHA `6cd5124f…`；`verify_dipper_payload.py --probe` 全通过，ABL 余量 `2553632B` |
+| 启动 | 20:47 `fastboot boot` Sending/Booting OKAY（临时、无 flash）；之后设备 `offline`（adb/fastboot 均无，USB 设备仍在，非 9008），与 boot024 整机停摆一致；等待用户长按电源+音量下 ~12 秒 |
+| 状态 | **boot-025 日志尚未取到**；手机停在挂死内核，需回 fastboot 后由脚本自动临时 TWRP 取日志 |
+
+### 环境阻塞与已验证替代
+- `wsl.exe` 被安全策略禁止（不可重试/绕过）。`wifi-port/build_dipper_checkpoint_image_win.py` 用纯 Windows Python 复现 `mkpayload.py` + `mkbootimg.py`，shim kernel slot 从上版镜像逐字节复用。**干跑等价性：旧内核重打包得到完全相同镜像 SHA `c86fd440…` 与 payload**，故新镜像只有 kernel 变化。
+- `github_workflow.py download` 的 urllib 重定向会无限挂起；artifact blob 限速 ~140KB/s。`download_ci_kernel_fast.py` 取 302 Location 后用 6 段并发 `curl.exe --range` 续传，内核包 `54532706B` 完整；`logs.zip` `7460907B` 单独重下并 zip 校验。凭据/SAS URL 均不输出。
+- `run_dipper_boot025.py`：`fastboot getvar` 输出在 **stderr**，只读 stdout 会误判 `wrong device product`（首跑因此中止，手机未受影响）；已修正为合并 stdout+stderr。另加「boot 后先等脱离 fastboot 再轮询」，避免把旧 fastboot 会话误当「手机已回来」。
+
+### 参考比对
+Dipper 原 `patches/xnu-mi8.patch` 1517/1817 行：`gmu_smmu_idle` 的第三次 `ml_io_map(GMU_PHYS, GMU_SIZE)`、`rd(gmu+GMU_WORD(0x5000))` 与 step12 顺序**原样来自已在真机跑通的 Dipper**，不是我们抄错。step11 日志末 `PDC_GPU_ENABLE_PDC=0x80000001`、`RSC_STATUS0_DRV0=0x01000000`、`SEQ_BUSY=0`；PDC enable 后 GMU/GPUCC/SMMU 总线状态变化仍是候选根因，须由 boot-025 检查点序列证实，不盲改。
+
+### 下一步
+取到 `boot-025-dipper-step12-diag.txt` → `analyze_dipper_step12.py` 定位最后落盘点 → 改源码 → 重导 0102 → GNU patch 完整重放 14 文件（勿用 `git apply --check`）→ 新 RUN → Windows 打包 → 临时上机。先修完 step12，才做 GPU 命令自检与 Mesa/EAGL 桌面接入、Wi‑Fi。
+
 ## 2026-11-06 20:05 接手续轮：boot024 分析完成，step12 诊断版检查点已就绪（本节覆盖下方所有旧状态）
 
 本轮只做分析与源码级诊断：**没有编译、没有 CI、没有打包、没有启动、没有 flash、没有动手机、没有 commit git**。GPU/整体流畅度/Wi-Fi/蓝牙仍未修好，绝不能写安装成功。手机仍临时 TWRP，adb 7f9594af；boot 仍原 HyperOS，userdata 已 iOS HFS，禁止普通启动 Android 或格式化 data。禁止子Agent，大文件全在 F 盘。
