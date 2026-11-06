@@ -40,6 +40,23 @@
  iokit/Kernel/arm/SweetBattery.cpp                                optional iokitcpp
  iokit/Kernel/arm/hid/SweetHID.cpp                                optional iokitcpp
  iokit/Kernel/arm/hid/IOHIDEvent.cpp                              optional iokitcpp
+--- a/osfmk/arm/io_map.c
++++ b/osfmk/arm/io_map.c
+@@ -62,7 +62,14 @@
+ 
+ extern vm_offset_t virtual_space_start;     /* Next available kernel VA */
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++/* Dipper EXP-0214: the A630/display/modem mappings require more than 8 MiB.
++ * This reserves virtual address space, not 32 MiB of physical RAM.
++ */
++#define IO_MAP_SIZE            (32ul << 20)
++#else
+ #define IO_MAP_SIZE            (8ul << 20)
++#endif
+ 
+ __startup_data static struct mach_vm_range io_range;
+ static SECURITY_READ_ONLY_LATE(vm_map_t) io_submap;
 diff --git a/bsd/dev/mi8_adreno.c b/bsd/dev/mi8_adreno.c
 new file mode 100644
 --- /dev/null
