@@ -1,3 +1,11 @@
+## 2026-11-06 23:45 续轮：boot-034 证伪显示 DMA 假设；改零编译 stage 二分（本节覆盖下方所有旧状态）
+
+- boot-034（51889 B / flush #16，内核 `4a06bb9d…` / CI `42241108354` / 镜像 `3a3fc06f…`，`gpu=1 mi8gpu_trace_ms=100 ufslogsecs=1`）：默认关 screen 映射 + 不绑定 stream 0，**仍整机静默**；末行 `g3d: enter`，新检查点全未落盘，无 SpringBoard / FB swap。→ 显示 DMA 冲突假设被证伪，挂点在 g3d 入口后第一处硬件动作前；最可疑 `redwood_wifi_file("a630_sqe.fw")` 的 `ml_io_map`。
+- 打法变更：新增 `mi8gpu_g3d_stage=N`（默认 4 完整），0=只解析参数、1=+SQE 查找、2=+idle MMIO、3=+页表、4=+context/ATOS；每档早退 `return false` + checkpoint。一个内核、只改 cmdline 即可 5 档二分，不再每轮重编译。
+- 0102 重导 702250 B，14/14 重放一致；备份 `out/0102-pre-g3d-stage-20261106.patch`。
+- 下一步：CI → 下载 → `mi8gpu_g3d_stage=3` 取 boot-035；活则锁定 stage 4，挂则退 stage 1/0。
+- 未 flash、未宣布成功；用户质问「近 4 小时无进展」，据实记录。
+
 ## 2026-11-06 23:13 续轮：boot-033 = 跳过 g3d 能进桌面但纯软渲染；g3dopt 待 CI（本节覆盖下方所有旧状态）
 
 - boot-033（288290 B / flush #147，`gpu=1 mi8gpu_steps=19`）：`auto step 19 done`，SpringBoard 643 行、16 次 `SWEET FB: swap`、60 Hz vsync 正常，末尾 `THE GPU IS NOT STARTED; the system draws with its software renderer`。21 步的 boot-032 则 `g3d: enter` 后整机静默 → `g3d_smmu_setup()` 是唯一硬阻塞，跳过它只能进软渲染桌面。

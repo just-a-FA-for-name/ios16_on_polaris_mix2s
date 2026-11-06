@@ -61,7 +61,7 @@ diff --git a/bsd/dev/mi8_adreno.c b/bsd/dev/mi8_adreno.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/mi8_adreno.c
-@@ -0,0 +1,4947 @@
+@@ -0,0 +1,4978 @@
 +/*
 + * The GPU of the Xiaomi Mi 8 (dipper, SDM845): an Adreno 630 (chip id 0x06030001, "qcom,chipid" of the phone's
 + * own device tree), woken step by step. Only with boot-arg mi8gpu=N, which performs steps 1 to N and stops.
@@ -1309,11 +1309,21 @@ new file mode 100644
 +g3d_smmu_setup(void)
 +{
 +	uint64_t *l1, *l2, *l3, root, phys, expected;
-+	vm_offset_t cb = smmu_cb(G3D_CTX);
-+	polaris_gpu_checkpoint("g3d: enter");
++	vm_offset_t cb;
 +	uint32_t wrong = 0, pages = 0, smr_value = SMMU_SMR_VALID | G3D_STREAM;
-+	uint32_t screen_opt = 0, bind_stream = 0;
++	uint32_t screen_opt = 0, bind_stream = 0, g3d_stage = 4;
 +	uint64_t fw_size = 0;
++	polaris_gpu_checkpoint("g3d: enter");
++	cb = smmu_cb(G3D_CTX);
++	/* boot-034: even with the screen mapping and stream 0 binding disabled the
++	 * machine stopped before the first in-body checkpoint landed. Split g3d into
++	 * cmdline-selectable stages so one kernel can bisect this with zero rebuilds.
++	 * stage 0 = args only, 1 = + SQE firmware lookup, 2 = + idle MMIO reads,
++	 * 3 = + page tables, 4 = the full original sequence (default). */
++	(void)PE_parse_boot_argn("mi8gpu_g3d_stage", &g3d_stage, sizeof(g3d_stage));
++	if (g3d_stage > 4) {
++		g3d_stage = 4;
++	}
 +
 +	/* boot-026/032: this function always stopped the machine on Polaris.
 +	 * Mapping the panel's framebuffer into the 3D core and binding stream 0
@@ -1324,9 +1334,20 @@ new file mode 100644
 +	if (!screen_opt) {
 +		g3d_regions[G3D_REGIONS - 1].size = 0;
 +	}
++	polaris_gpu_checkpoint("g3d: args parsed");
++	if (g3d_stage == 0) {
++		printf("mi8gpu: g3d stage 0 stop (args only)\n");
++		polaris_gpu_checkpoint("g3d: stage 0 return");
++		return false;
++	}
 +	polaris_gpu_checkpoint("g3d: before fw lookup");
 +	const uint8_t *fw = redwood_wifi_file("a630_sqe.fw", &fw_size);
 +	polaris_gpu_checkpoint("g3d: fw lookup done");
++	if (g3d_stage == 1) {
++		printf("mi8gpu: g3d stage 1 stop (SQE lookup %llu bytes)\n", fw_size);
++		polaris_gpu_checkpoint("g3d: stage 1 return");
++		return false;
++	}
 +
 +	if (fw == NULL || fw_size <= G3D_SQE_FILE_SKIP || fw_size - G3D_SQE_FILE_SKIP > g3d_regions[0].size) {
 +		printf("mi8gpu: a630_sqe.fw missing or not the expected size (%llu)\n", fw_size);
@@ -1341,6 +1362,11 @@ new file mode 100644
 +		return false;
 +	}
 +	polaris_gpu_checkpoint("g3d: idle checks passed");
++	if (g3d_stage == 2) {
++		printf("mi8gpu: g3d stage 2 stop (idle MMIO reads done)\n");
++		polaris_gpu_checkpoint("g3d: stage 2 return");
++		return false;
++	}
 +	printf("mi8gpu: a630_sqe.fw: %llu bytes, first words %08x %08x %08x %08x\n", fw_size, ((const uint32_t *)fw)[0],
 +	    ((const uint32_t *)fw)[1], ((const uint32_t *)fw)[2], ((const uint32_t *)fw)[3]);
 +	polaris_gpu_checkpoint("g3d: before table allocation");
@@ -1420,6 +1446,11 @@ new file mode 100644
 +	}
 +	polaris_gpu_checkpoint("g3d: page tables built");
 +	to_memory(g3d_tables, round_page(G3D_TABLE_POOL));
++	if (g3d_stage == 3) {
++		printf("mi8gpu: g3d stage 3 stop (%u page tables built, no context writes)\n", pages);
++		polaris_gpu_checkpoint("g3d: stage 3 return");
++		return false;
++	}
 +	g3d_old.smr = rd(smmu + SMMU_SMR(G3D_SMR_ENTRY));
 +	g3d_old.s2cr = rd(smmu + SMMU_S2CR(G3D_SMR_ENTRY));
 +	g3d_old.cbar = rd(smmu + SMMU_CBAR(G3D_CTX));
