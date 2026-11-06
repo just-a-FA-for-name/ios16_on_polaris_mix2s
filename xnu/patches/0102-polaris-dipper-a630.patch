@@ -44,7 +44,7 @@ diff --git a/bsd/dev/mi8_adreno.c b/bsd/dev/mi8_adreno.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/mi8_adreno.c
-@@ -0,0 +1,4723 @@
+@@ -0,0 +1,4760 @@
 +/*
 + * The GPU of the Xiaomi Mi 8 (dipper, SDM845): an Adreno 630 (chip id 0x06030001, "qcom,chipid" of the phone's
 + * own device tree), woken step by step. Only with boot-arg mi8gpu=N, which performs steps 1 to N and stops.
@@ -86,6 +86,8 @@ new file mode 100644
 +#include <pexpert/pexpert.h>
 +#include <sys/redwood_input.h>
 +#include <sys/systm.h>
++#include <sys/param.h>
++#include <sys/kernel.h>
 +#include <sys/sysctl.h>
 +#include <kern/locks.h>
 +#include <vm/vm_kern.h>
@@ -4271,32 +4273,58 @@ new file mode 100644
 + * what the phone's own start leaves (EXP-0077): the branches of this file off, the GMU's clock source released, the CX
 + * switch collapsed. Only what step 3 can read safely is looked at: with the register bus off, nothing is touched.
 + */
++/* Diagnostic pauses use the scheduler so the UFS log thread can persist the
++ * checkpoint before a possibly blocking MMIO access. Default adds no pause.
++ */
 +static void
++polaris_gpu_checkpoint(const char *where)
++{
++    static int channel;
++    uint32_t ms = 0;
++    printf("mi8gpu: checkpoint %s\n", where);
++    if (PE_parse_boot_argn("mi8gpu_trace_ms", &ms, sizeof(ms)) && ms) {
++        if (ms > 3000) ms = 3000;
++        (void)tsleep(&channel, PZERO, "gpuchk", MAX(1, (int)((ms * hz + 999) / 1000)));
++    }
++}
++
++static bool
 +stale_stop(void)
 +{
-+	vm_offset_t g = ml_io_map(GCC_PHYS, GCC_SIZE), cc;
-+	uint32_t gdscr;
-+
-+	if (rd(g + GCC_GPU_CFG_AHB) & CBCR_OFF) {
-+		return;
-+	}
-+	cc = ml_io_map(GPUCC_PHYS, GPUCC_SIZE);
-+	gdscr = rd(cc + 0x106c);
-+	if (!(gdscr & GDSC_PWR_ON)) {
-+		return;
-+	}
-+	printf("mi8gpu: an earlier run left the CX switch on (GDSCR %#010x, hw control %#010x, cx_gmu_clk %#010x): switching it off\n",
-+	    gdscr, rd(cc + 0x1540), rd(cc + 0x1098));
-+	wr(cc + 0x1098, rd(cc + 0x1098) & ~1u);
-+	wr(cc + 0x109c, rd(cc + 0x109c) & ~1u);
-+	wr(cc + 0x1120, rd(cc + 0x1120) & ~2u);
-+	wr(g + 0x71018, rd(g + 0x71018) & ~1u);
-+	wr(g + 0x7100c, rd(g + 0x7100c) & ~1u);
-+	sleep_us(100);
-+	wr(cc + 0x106c, rd(cc + 0x106c) | 1u);
-+	sleep_us(500);
-+	printf("mi8gpu: after it: CX GDSCR %#010x, hw control %#010x, cx_gmu_clk %#010x, memnoc %#010x\n", rd(cc + 0x106c),
-+	    rd(cc + 0x1540), rd(cc + 0x1098), rd(g + 0x7100c));
++    vm_offset_t g, cc;
++    uint32_t branch, gdscr;
++    polaris_gpu_checkpoint("stale: before GCC map");
++    g = ml_io_map(GCC_PHYS, GCC_SIZE);
++    printf("mi8gpu: stale GCC mapping %#llx\n", (uint64_t)g);
++    if (!g) { printf("mi8gpu: stale GCC mapping failed; no access\n"); return false; }
++    polaris_gpu_checkpoint("stale: before GCC GPU_CFG_AHB read @0x171004");
++    branch = rd(g + GCC_GPU_CFG_AHB);
++    printf("mi8gpu: stale GCC GPU_CFG_AHB %#x\n", branch);
++    if (branch & CBCR_OFF) return true;
++    polaris_gpu_checkpoint("stale: before GPUCC map");
++    cc = ml_io_map(GPUCC_PHYS, GPUCC_SIZE);
++    printf("mi8gpu: stale GPUCC mapping %#llx\n", (uint64_t)cc);
++    if (!cc) { printf("mi8gpu: stale GPUCC mapping failed; no access\n"); return false; }
++    polaris_gpu_checkpoint("stale: before CX GDSCR read @0x509106c");
++    gdscr = rd(cc + 0x106c);
++    printf("mi8gpu: stale CX GDSCR %#x\n", gdscr);
++    if (!(gdscr & GDSC_PWR_ON)) return true;
++    polaris_gpu_checkpoint("stale: before CX_GMU clock clear @0x5091098");
++    wr(cc + 0x1098, rd(cc + 0x1098) & ~1u);
++    polaris_gpu_checkpoint("stale: before CXO clock clear @0x509109c");
++    wr(cc + 0x109c, rd(cc + 0x109c) & ~1u);
++    polaris_gpu_checkpoint("stale: before GMU RCG clear @0x5091120");
++    wr(cc + 0x1120, rd(cc + 0x1120) & ~2u);
++    polaris_gpu_checkpoint("stale: before GCC SNOC clear @0x171018");
++    wr(g + 0x71018, rd(g + 0x71018) & ~1u);
++    polaris_gpu_checkpoint("stale: before GCC MEMNOC clear @0x17100c");
++    wr(g + 0x7100c, rd(g + 0x7100c) & ~1u);
++    sleep_us(100);
++    polaris_gpu_checkpoint("stale: before CX collapse @0x509106c");
++    wr(cc + 0x106c, rd(cc + 0x106c) | 1u);
++    sleep_us(500);
++    polaris_gpu_checkpoint("stale: cleanup complete");
++    return true;
 +}
 +
 +
@@ -4459,7 +4487,12 @@ new file mode 100644
 +			}
 +		}
 +	}
-+	stale_stop();
++	polaris_gpu_checkpoint("probe: delay finished");
++	if (!stale_stop()) {
++		printf("mi8gpu: probe stopped before any GPU step\n");
++		thread_terminate(current_thread());
++		return;
++	}
 +	{
 +		uint32_t zap = 0;
 +
@@ -4469,6 +4502,7 @@ new file mode 100644
 +	}
 +	for (uint32_t step = 1; step <= last && step <= STEPS; step++) {
 +		printf("mi8gpu: step %u\n", step);
++		polaris_gpu_checkpoint("probe: before next step");
 +		if (!steps[step - 1]()) {
 +			printf("mi8gpu: step %u: stopped; the steps after it are not attempted\n", step);
 +			break;
@@ -4603,7 +4637,10 @@ new file mode 100644
 +{
 +	mi8_keep = true;
 +	gmu_last_step = 21;
-+	stale_stop();
++	if (!stale_stop()) {
++		printf("mi8gpu: automatic startup stopped before any GPU step\n");
++		return;
++	}
 +	for (uint32_t step = 1; step <= 21 && step <= STEPS; step++) {
 +		if (!steps[step - 1]()) {
 +			printf("mi8gpu: step %u: stopped; the steps after it are not attempted\n", step);
