@@ -61,7 +61,7 @@ diff --git a/bsd/dev/mi8_adreno.c b/bsd/dev/mi8_adreno.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/mi8_adreno.c
-@@ -0,0 +1,4913 @@
+@@ -0,0 +1,4928 @@
 +/*
 + * The GPU of the Xiaomi Mi 8 (dipper, SDM845): an Adreno 630 (chip id 0x06030001, "qcom,chipid" of the phone's
 + * own device tree), woken step by step. Only with boot-arg mi8gpu=N, which performs steps 1 to N and stops.
@@ -4778,17 +4778,32 @@ new file mode 100644
 +static void
 +mi8_gpu_start_by_itself(void)
 +{
++	uint32_t want = 21;
++
++	/* A step count that can be shortened from the command line: whichever
++	 * step hangs the machine is then found by one comparison of two runs. */
++	(void)PE_parse_boot_argn("mi8gpu_steps", &want, sizeof(want));
++	if (want > STEPS) {
++		want = STEPS;
++	}
 +	mi8_keep = true;
-+	gmu_last_step = 21;
++	gmu_last_step = want;
++	printf("mi8gpu: automatic startup: %u steps (mi8gpu_steps)\n", want);
++	polaris_gpu_checkpoint("auto: before stale_stop");
 +	if (!stale_stop()) {
 +		printf("mi8gpu: automatic startup stopped before any GPU step\n");
 +		return;
 +	}
-+	for (uint32_t step = 1; step <= 21 && step <= STEPS; step++) {
++	polaris_gpu_checkpoint("auto: stale_stop done");
++	for (uint32_t step = 1; step <= want && step <= STEPS; step++) {
++		printf("mi8gpu: auto step %u begin\n", step);
++		polaris_gpu_checkpoint("auto: step begin");
 +		if (!steps[step - 1]()) {
 +			printf("mi8gpu: step %u: stopped; the steps after it are not attempted\n", step);
 +			break;
 +		}
++		printf("mi8gpu: auto step %u done\n", step);
++		polaris_gpu_checkpoint("auto: step done");
 +	}
 +	if (gpu_kept) {
 +		uint32_t test = 0;
@@ -5447,7 +5462,7 @@ diff --git a/bsd/dev/redwood_adreno.c b/bsd/dev/redwood_adreno.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/redwood_adreno.c
-@@ -0,0 +1,4232 @@
+@@ -0,0 +1,4237 @@
 +#if defined(ARM64_BOARD_CONFIG_SWEET)
 +/* Polaris uses the Dipper A630 backend exclusively. The other backend below
 + * expects the HackiOS APFS image/return-to-UEFI ABI, absent from this shim.
@@ -9587,7 +9602,12 @@ new file mode 100644
 +		display_probe();
 +	}
 +	if (!PE_parse_boot_argn("adreno", &last_step, sizeof(last_step))) {
-+		if (!(PE_parse_boot_argn("gpu", &only, sizeof(only)) && only) || !start_by_itself()) {
++		/* On the MIX 2S (SDM845) gpu=1 belongs to bsd/dev/mi8_adreno.c, the
++		 * imported A630 driver. This file is the donor phone's SC7280 / Adreno
++		 * 642L sequence: running it on the 845 with the wrong register map
++		 * blocked the root mount before launchd (boot-030, boot-031). Only an
++		 * explicit adreno_by_itself=1 asks for the old automatic sequence. */
++		if (!(PE_parse_boot_argn("adreno_by_itself", &only, sizeof(only)) && only) || !start_by_itself()) {
 +			return;
 +		}
 +		by_itself = true;

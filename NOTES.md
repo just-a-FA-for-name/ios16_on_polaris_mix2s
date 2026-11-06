@@ -1,3 +1,17 @@
+## 2026-11-06 22:25 续轮：gpu=1 卡死真因是两套 GPU 驱动同时触发（本节覆盖下方所有旧状态）
+
+- `gpu=1` 被 `mi8_adreno.c`（导入的 A630）和 `redwood_adreno.c:4140`（原有 SC7280/642L 驱动）**同时读取**；后者在根文件系统之前同步跑 21 步并等待，用错芯片的寄存器地图，把 `exec mount_hfs` 阶段卡死。boot-030（新日志 17697 B）launchd 已起但无任何 mi8gpu 行，停在 mount_hfs。
+- 零编译解法：`redwood_adreno_init()` 里显式 `adreno=0` 会直接 return，不碰 gpu=1。已打镜像 `out/ci-42229904449-gpu1-adreno0/...img` SHA `0c3693f3…`（同内核 `2e53a0dc…`，cmdline 475 B 尾部 `gpu=1 adreno=0 ufslogsecs=1`），`boot-031-gpu1-adreno0` 上机中。
+- 长期方向：去掉 redwood_adreno_init 的 gpu=1 自动启动分支，只认显式 `adreno=N`；等 boot-031 验证后再改源码/CI。
+- 未 flash、未宣布成功；GPU 保留/RedwoodGPUStart/g3d/restore/桌面仍待验。
+
+## 2026-11-06 22:05 续轮：boot-029 证明 GMU/HFI/3D core 起得来；gpu=1 卡死是同步阻塞 UFS 线程（本节覆盖下方所有旧状态）
+
+- `boot-029-m19.txt`（新日志，`gpu=0 mi8gpu=19`）：step 13..19 全 done，GMU 固件 `0xbabeface`、HFI start COMPLETE（5 类消息 error 0）、HFI version 0x10070000、GPU_SET acknowledged、3D core HWCG/CORE/PROTECT done。**845 参考硬件路径在 Polaris 上可用**；但探针跑完 teardown，GPU 不留、桌面未接管。
+- `boot-028-gpu1.txt` 与 boot-027 SHA 完全相同 → gpu=1 内核没写一行新日志：`mi8_adreno_init()` 在 `sweet_ufs.c:673` 的 UFS init 线程同步跑 21 步，堵死根设备，launchd 未到。
+- 修复：`15941e1`（restore 顺序 + g3d 页表循环缓存/检查点）、`afcd54d`（gpu=1 改异步 kernel thread + 20 s 延迟）。0102 重导 699097 B，重放 14/14 一致。最终 CI `42229904449`（head `afcd54d`）编译中；`42228766676` 被自动 cancel。
+- 下一步：用新内核打 `gpu=1` 正式镜像取 `boot-030-gpu1-async`，验收 launchd/SpringBoard、21 步 done、`gpu_kept`、`RedwoodGPUStart()`、桌面正常。
+
 ## 2026-11-06 21:55 续轮：前四轮测的是 gpu=0 探针，已打 gpu=1 正式镜像并修 g3d/restore（本节覆盖下方所有旧状态）
 
 - 关键纠正：`boot-024..027` cmdline 均为 `gpu=0 mi8gpu=21|12`，是 Dipper 分阶段探针，跑完 teardown，GPU 服务从不启动；`gpu=1` 且无 `mi8gpu` 才走 `mi8_gpu_start_by_itself()` → step1..21 → `RedwoodGPUStart()`。
