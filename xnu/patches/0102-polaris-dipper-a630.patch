@@ -61,7 +61,7 @@ diff --git a/bsd/dev/mi8_adreno.c b/bsd/dev/mi8_adreno.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/mi8_adreno.c
-@@ -0,0 +1,4760 @@
+@@ -0,0 +1,4821 @@
 +/*
 + * The GPU of the Xiaomi Mi 8 (dipper, SDM845): an Adreno 630 (chip id 0x06030001, "qcom,chipid" of the phone's
 + * own device tree), woken step by step. Only with boot-arg mi8gpu=N, which performs steps 1 to N and stops.
@@ -116,6 +116,8 @@ new file mode 100644
 +extern void loader_log_putc(char c);
 +
 +static int say(const char *format, ...) __printflike(1, 2);
++/* defined next to the probe loop; step 12 needs persisted checkpoints long before that definition */
++static void polaris_gpu_checkpoint(const char *where);
 +
 +/* to the loader's log at once as well: a step that hangs the machine leaves no other trace */
 +static int
@@ -1098,25 +1100,60 @@ new file mode 100644
 +gmu_smmu_idle(void)
 +{
 +	vm_offset_t cb = smmu_cb(GMU_CTX);
-+	vm_offset_t gmu = ml_io_map(GMU_PHYS, GMU_SIZE);
-+	uint32_t cbar = rd(smmu + SMMU_CBAR(GMU_CTX));
-+	uint32_t s2cr = rd(smmu + SMMU_S2CR(GMU_SMR_ENTRY));
++	vm_offset_t gmu;
++	uint32_t cbar, s2cr, reset, gx, sctlr, ttbr0_lo, ttbr0_hi, ttbr1_lo, ttbr1_hi;
 +
-+	printf("mi8gpu: SMMU idle check: reset %#x GX %#x S2CR %#x CBAR %#x\n",
-+	    rd(gmu + GMU_WORD(0x5000)), rd(gpucc + 0x100c), s2cr, cbar);
-+	if (rd(gmu + GMU_WORD(0x5000)) != 1 || (rd(gpucc + 0x100c) & GDSC_PWR_ON) ||
-+	    (s2cr != 0x200ff && s2cr != GMU_CTX) || (cbar != 0 && cbar != CBAR_STAGE_1) ||
-+	    rd(cb + CB_SCTLR) || rd(cb + CB_TTBR0_LO) || rd(cb + CB_TTBR0_HI) ||
-+	    rd(cb + CB_TTBR1_LO) || rd(cb + CB_TTBR1_HI)) {
++	polaris_gpu_checkpoint("s12 idle: enter");
++	printf("mi8gpu: s12 idle: smmu %#llx cb(%u) %#llx (cb_base %#x page %#x); GR1 %#x CBAR(%u) %#x CBA2R(%u) %#x; "
++	    "SMR(%u) %#x S2CR(%u) %#x; banks %u entries %u; stream %u valid %#x\n",
++	    (uint64_t)smmu, GMU_CTX, (uint64_t)cb, smmu_pages_cb_base, smmu_page_size, SMMU_GR1,
++	    GMU_CTX, SMMU_CBAR(GMU_CTX), GMU_CTX, SMMU_CBA2R(GMU_CTX), GMU_SMR_ENTRY,
++	    SMMU_SMR(GMU_SMR_ENTRY), GMU_SMR_ENTRY, SMMU_S2CR(GMU_SMR_ENTRY),
++	    smmu_num_cb, smmu_num_smr, GMU_STREAM, SMMU_SMR_VALID);
++	polaris_gpu_checkpoint("s12 idle: before GMU remap");
++	gmu = ml_io_map(GMU_PHYS, GMU_SIZE);
++	printf("mi8gpu: s12 idle: GMU remap %#llx, existing gmu_base %#llx, phys %#lx size %#lx\n",
++	    (uint64_t)gmu, (uint64_t)gmu_base, (unsigned long)GMU_PHYS, (unsigned long)GMU_SIZE);
++	polaris_gpu_checkpoint("s12 idle: after GMU remap");
++	if (gmu == 0) {
++		printf("mi8gpu: s12 idle: GMU remap is empty; no MMIO read attempted\n");
++		return false;
++	}
++	polaris_gpu_checkpoint("s12 idle: before CBAR/CBA2R read");
++	cbar = rd(smmu + SMMU_CBAR(GMU_CTX));
++	printf("mi8gpu: s12 idle: CBAR(%u) %#010x CBA2R(%u) %#010x SCR0 %#010x sGFSR %#010x\n",
++	    GMU_CTX, cbar, GMU_CTX, rd(smmu + SMMU_CBA2R(GMU_CTX)), rd(smmu + SMMU_SCR0),
++	    rd(smmu + SMMU_SGFSR));
++	polaris_gpu_checkpoint("s12 idle: before S2CR/SMR read");
++	s2cr = rd(smmu + SMMU_S2CR(GMU_SMR_ENTRY));
++	printf("mi8gpu: s12 idle: S2CR(%u) %#010x SMR(%u) %#010x\n", GMU_SMR_ENTRY, s2cr,
++	    GMU_SMR_ENTRY, rd(smmu + SMMU_SMR(GMU_SMR_ENTRY)));
++	polaris_gpu_checkpoint("s12 idle: before GMU reset / GX read");
++	reset = rd(gmu + GMU_WORD(0x5000));
++	gx = rd(gpucc + 0x100c);
++	printf("mi8gpu: SMMU idle check: reset %#x GX %#x S2CR %#x CBAR %#x\n", reset, gx, s2cr, cbar);
++	polaris_gpu_checkpoint("s12 idle: before context bank read");
++	sctlr = rd(cb + CB_SCTLR);
++	ttbr0_lo = rd(cb + CB_TTBR0_LO);
++	ttbr0_hi = rd(cb + CB_TTBR0_HI);
++	ttbr1_lo = rd(cb + CB_TTBR1_LO);
++	ttbr1_hi = rd(cb + CB_TTBR1_HI);
++	printf("mi8gpu: s12 idle: CB(%u) SCTLR %#010x TTBR0 %#010x%08x TTBR1 %#010x%08x FSR %#010x\n",
++	    GMU_CTX, sctlr, ttbr0_hi, ttbr0_lo, ttbr1_hi, ttbr1_lo, rd(cb + CB_FSR));
++	polaris_gpu_checkpoint("s12 idle: before precondition test");
++	if (reset != 1 || (gx & GDSC_PWR_ON) || (s2cr != 0x200ff && s2cr != GMU_CTX) ||
++	    (cbar != 0 && cbar != CBAR_STAGE_1) || sctlr || ttbr0_lo || ttbr0_hi || ttbr1_lo || ttbr1_hi) {
 +		printf("mi8gpu: SMMU idle preconditions not met: untouched\n");
 +		return false;
 +	}
++	polaris_gpu_checkpoint("s12 idle: before SMR scan");
 +	for (uint32_t n = 0; n < smmu_num_smr; n++) {
 +		if (rd(smmu + SMMU_SMR(n)) != 0) {
 +			printf("mi8gpu: SMR %u is not empty: untouched\n", n);
 +			return false;
 +		}
 +	}
++	polaris_gpu_checkpoint("s12 idle: PASS");
 +	return true;
 +}
 +
@@ -1401,6 +1438,9 @@ new file mode 100644
 +	vm_offset_t cb;
 +	uint32_t wrong = 0, pages = 0;
 +
++	polaris_gpu_checkpoint("s12: enter step_gmu_smmu");
++	printf("mi8gpu: s12: smmu %#llx num_cb %u num_smr %u; want ctx %u entry %u stream %u\n",
++	    (uint64_t)smmu, smmu_num_cb, smmu_num_smr, GMU_CTX, GMU_SMR_ENTRY, GMU_STREAM);
 +	if (smmu == 0 || smmu_num_cb <= GMU_CTX || smmu_num_smr <= GMU_SMR_ENTRY) {
 +		printf("mi8gpu: the SMMU was not read (step 7), or has too few context banks\n");
 +		return false;
@@ -1410,13 +1450,20 @@ new file mode 100644
 +	if (PE_parse_boot_argn("mi8gpu_smr_probe", &smr_probe, sizeof(smr_probe)) && smr_probe == 1) {
 +		return gmu_smr_probe();
 +	}
++	polaris_gpu_checkpoint("s12: before gmu_smmu_idle");
 +	if (!gmu_smmu_idle()) {
++		polaris_gpu_checkpoint("s12: gmu_smmu_idle returned false");
 +		return false;
 +	}
++	polaris_gpu_checkpoint("s12: gmu_smmu_idle returned true");
++	polaris_gpu_checkpoint("s12: before table allocation");
 +	if (kmem_alloc(kernel_map, &gmu_tables, PAGE_SIZE, KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
 +		printf("mi8gpu: no memory for the tables\n");
 +		return false;
 +	}
++	printf("mi8gpu: s12: gmu_tables VA %#llx phys %#llx, %u regions\n",
++	    (uint64_t)gmu_tables, (uint64_t)kvtophys(gmu_tables), GMU_REGIONS);
++	polaris_gpu_checkpoint("s12: before region allocation");
 +	for (uint32_t r = 0; r < GMU_REGIONS; r++) {
 +		if (kmem_alloc(kernel_map, &gmu_regions[r].memory, PAGE_SIZE, KMA_KOBJECT | KMA_ZERO | KMA_DATA,
 +		    VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
@@ -1424,7 +1471,10 @@ new file mode 100644
 +			gmu_smmu_free();
 +			return false;
 +		}
++		printf("mi8gpu: s12: region %u %s VA %#llx phys %#llx\n", r, gmu_regions[r].name,
++		    (uint64_t)gmu_regions[r].memory, (uint64_t)kvtophys(gmu_regions[r].memory));
 +	}
++	polaris_gpu_checkpoint("s12: allocations done");
 +	/* the three tables: level 1 (indexed by address bits 38:30), level 2 (29:21), level 3 (20:12) */
 +	l1 = (uint64_t *)gmu_tables;
 +	l2 = (uint64_t *)(gmu_tables + 0x1000);
@@ -1470,6 +1520,13 @@ new file mode 100644
 +	printf("mi8gpu: before: SMR %#010x S2CR %#010x CBAR %#010x CBA2R %#010x SCTLR %#010x TCR %#010x TCR2 %#010x TTBR0 %#010x%08x MAIR0 %#010x\n",
 +	    smmu_old.smr, smmu_old.s2cr, smmu_old.cbar, smmu_old.cba2r, smmu_old.sctlr, smmu_old.tcr, smmu_old.tcr2,
 +	    smmu_old.ttbr0_hi, smmu_old.ttbr0_lo, smmu_old.mair0);
++	polaris_gpu_checkpoint("s12: before context programming");
++	printf("mi8gpu: s12: will set ctx %u CBAR %#x CBA2R %#x TCR %#x TCR2 %#x MAIR0 %#x root %#llx; "
++	    "entry %u S2CR %#x SMR %#x\n",
++	    GMU_CTX, CBAR_STAGE_1, CBA2R_64_BIT, TCR_39_BITS, TCR2_36_BITS, MAIR0_LINUX,
++	    (uint64_t)(root | ((uint64_t)GMU_CTX << 48)), GMU_SMR_ENTRY, GMU_CTX,
++	    SMMU_SMR_VALID | GMU_STREAM);
++	polaris_gpu_checkpoint("s12: before first SMMU write");
 +
 +	/* arm-smmu.c: the context is made complete and tagged before it is switched on, then the stream is sent to it */
 +	root |= (uint64_t)GMU_CTX << 48;
@@ -1494,6 +1551,7 @@ new file mode 100644
 +		printf("mi8gpu: the SMMU does not finish forgetting old translations (%#x)\n", rd(cb + CB_TLBSTATUS));
 +		return false;
 +	}
++	polaris_gpu_checkpoint("s12: before SCTLR on / stream bind");
 +	wr(cb + CB_SCTLR, SCTLR_ON);
 +	wr(smmu + SMMU_S2CR(GMU_SMR_ENTRY), GMU_CTX);
 +	/* EXP-0091 verified this exact value on the phone; both SDM845 device trees use SID 5 without a mask. */
@@ -1507,6 +1565,7 @@ new file mode 100644
 +	    rd(cb + CB_TTBR0_LO), rd(cb + CB_TCR), rd(cb + CB_TCR2), rd(cb + CB_MAIR0));
 +	printf("mi8gpu: stream entry %u: SMR %#010x S2CR %#010x\n", GMU_SMR_ENTRY, rd(smmu + SMMU_SMR(GMU_SMR_ENTRY)),
 +	    rd(smmu + SMMU_S2CR(GMU_SMR_ENTRY)));
++	polaris_gpu_checkpoint("s12: context and stream written");
 +	if (smr_used == 0 ||
 +	    (rd(smmu + SMMU_S2CR(GMU_SMR_ENTRY)) & 0x300ff) != GMU_CTX || !(rd(cb + CB_SCTLR) & 1) ||
 +	    rd(cb + CB_TTBR0_LO) != (uint32_t)root) {
@@ -1515,6 +1574,7 @@ new file mode 100644
 +	}
 +
 +	/* what the SMMU makes of every page of the regions, and of two addresses nothing maps */
++	polaris_gpu_checkpoint("s12: before page translation checks");
 +	for (uint32_t r = 0; r < GMU_REGIONS; r++) {
 +		uint32_t prior_wrong = wrong;
 +		for (uint32_t off = 0; off < gmu_regions[r].size; off += 0x1000) {
@@ -1527,6 +1587,7 @@ new file mode 100644
 +		printf("mi8gpu: %s: %u of %u pages wrong\n", gmu_regions[r].name, wrong - prior_wrong, gmu_regions[r].size / 0x1000);
 +	}
 +	printf("mi8gpu: %u of %u pages translated wrong\n", wrong, pages);
++	polaris_gpu_checkpoint("s12: page translations done");
 +	const uint64_t holes[] = { 0x60100000ull, 0x00001000ull };
 +	for (uint32_t h = 0; h < 2; h++) {
 +		enum smmu_translation result = smmu_translate(holes[h], &phys);

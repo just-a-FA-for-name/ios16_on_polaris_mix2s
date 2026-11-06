@@ -1,3 +1,37 @@
+## 2026-11-06 20:05 接手续轮：boot024 分析完成，step12 诊断版检查点已就绪（本节覆盖下方所有旧状态）
+
+本轮只做分析与源码级诊断：**没有编译、没有 CI、没有打包、没有启动、没有 flash、没有动手机、没有 commit git**。GPU/整体流畅度/Wi-Fi/蓝牙仍未修好，绝不能写安装成功。手机仍临时 TWRP，adb 7f9594af；boot 仍原 HyperOS，userdata 已 iOS HFS，禁止普通启动 Android 或格式化 data。禁止子Agent，大文件全在 F 盘。
+
+### boot024 确证与新增观察
+- summary.json：completed_steps 1..11、announced 1..12、step12_done=false、last_checkpoint="probe: before next step"；日志 46721B，SHA c7ca99d0…。
+- 日志 638-642 行：step 12 → checkpoint probe: before next step → 仅一条 SWEET PACE vsync gap，之后**全部静默**。没有 "SMMU idle check"，没有 "SMMU idle preconditions not met"，没有 step12 done，没有 HFI/fence/teardown。
+- 该检查点带 2 秒 tsleep 让 UFS 日志线程落盘，是可靠锚点；但之后连独立的 vsync 线程也不再打印，倾向整机级停摆（panic/总线 hang/printf 锁死）。**仍不能据此定位到某条指令**，未落盘尾部的不确定性保留，不硬说某次 SMMU 写已执行。
+
+### context/stream 权限与映射空间核算（静态，未上机）
+- SMMU sCR0 0x00200626（SMMUEN=0；USFCFG=1，未匹配流 FAULT）；5 个 SMR 全 0；5 个 S2CR 全 0x000200ff（type 2 fault / bank 255）；5 个 context bank 的 CBAR/SCTLR 全 0 → step8 时 idle 前置条件表面满足。
+- GMU_CTX=2、GMU_SMR_ENTRY=0、GMU_STREAM=5、SMMU_SMR_VALID=1<<31；CB(2)=smmu+0x8000+0x1000*2=+0xA000，落在 SMMU_SIZE 0x10000 内；SMMU_CBAR(2)=+0x1008（GR1=0x1000），SMMU_CBA2R(2)=+0x1808。映射覆盖没有越界，GR1 与 CB 区不重叠。
+- ml_io_map() 每次都从 io_submap 新分配 VA 且永不释放（io_map.c，KMA_PERMANENT）。到 step12 前 GPU 线程累计约 0x4f0000 ≈ 4.94 MiB（GCC 0x1f0000×2、GPUCC 0x9000×2、CMD_DB 0x20000、GMU 0x3a000×2、SMMU 0x10000、PDC/SEQ 0x20000），step12 再取 0x3a000。32 MiB 窗口足够，**窗口耗尽不是首要嫌疑**；8→32 MiB 修复不能单独解释 step12 仍卡。
+- GMU 在 step6(421行)、step9(566行 gmu_base)、step12 gmu_smmu_idle(1037行) 被重复映射三次；第三次是 step12 独有的新增动作，列为高嫌疑，但本轮**不改成复用 gmu_base**，先由检查点证实。
+- 候选阻塞点按嫌疑排序：① step12 独有的第三次 ml_io_map；② idle 汇总 printf 里的 rd(gmu+GMU_WORD(0x5000)) / rd(gpucc+0x100c)（旧版在 printf 参数里重复读，若映射为空即触发异常）；③ CBAR/S2CR 或 CB 区读取在 step11 RSC/PDC 编程后行为变化；④ 页表 kmem_alloc；⑤ 首批 SMMU 写。以上都没有实机证据，下一版检查点用于区分。
+
+### 本轮源码改动（纯诊断，不盲改寄存器、不绕过 idle/ownership）
+- polaris/out/dipper-gpu-xnu/xnu/bsd/dev/mi8_adreno.c：新增 polaris_gpu_checkpoint 前向声明；gmu_smmu_idle 拆成逐次可落盘检查点（入口 / GMU 重映射前后 / CBAR-CBA2R / S2CR-SMR / GMU reset-GX / context bank / 前置判定 / SMR 扫描 / PASS），打印 SMMU 全局与 CB 权限、映射 VA、num_cb/num_smr/cb_base/page_size、GMU remap 与已有 gmu_base 对比；重复 MMIO 读取改为缓存值；空映射 guard 直接返回 false，不做任何 MMIO。
+- step_gmu_smmu：入口、idle 前后、页表/region 分配前后、context 编程前、首批 SMMU 写前、SCTLR/stream 绑定前、写后回读后、页表翻译前后共 18 个可落盘检查点；打印将写入的 CBAR/CBA2R/TCR/TCR2/MAIR/root/SMR/S2CR 值和各分配 VA/物理地址，用于核实 context/stream 权限。
+- **没有改动任何寄存器写入值、没有删除或跳过 idle/ownership 前置检查、没有重做 GPU-off/核数/裁切/10Hz 对照。**
+
+### 补丁与验证
+- 0102 已由 wifi-port/build_dipper_gpu_patch.py 重导：694748B（原 690954B；旧版备份 polaris/out/0102-pre-step12-diag-20261106.patch）。
+- 注意：在 polaris/out/dipper-gpu-baseline/xnu 直接 `git apply --check` 会因上层 .git 的路径前缀只检查 4 个 modified 文件，10 个新增文件全部 "Skipped patch"，**不能当作完整重放通过**。
+- 已改用 GNU patch -p1 在 out/dipper-replay-step12-20261106/xnu 完整重放全部 14 文件；规范化 CRLF/LF 后 14/14 与 out/dipper-gpu-xnu/xnu 逐字节一致（工作树部分源文件是 CRLF，补丁生成本来按 LF 规范化，属既有情况，不影响 CI）。
+- 本地自动核对 338 个 printf 的格式符/参数，新增 printf 全部匹配（2 处误报在旧代码的条件表达式）；花括号 845/845 平衡。
+- 仓库 polaris 仅 `M xnu/patches/0102-polaris-dipper-a630.patch`（+72/-11）；按用户约束**未 commit**。
+
+### 下一步（等用户确认后再烧 CI / 上机）
+1. CI 用 wifi-port/github_workflow.py / ci_status_once.py，新 RUN；绝不输出 GCM 凭据；下载 kernel/build log/artifact 并校验 SHA 与实际编译单元。
+2. prepare_dipper_artifacts.py 用全新 RUN/目录，WSL 跑 build_dipper_checkpoint_image.sh，再独立解包/固件/边界/ABL 余量校验；保持 gpu=0 mi8gpu=21 mi8gpu_delay=20 ufslogsecs=1 mi8gpu_trace_ms=2000、8核/约5.2GiB/完整显示/60Hz/三键。
+3. 临时 fastboot boot，请用户等待（step12 新增 18 个 2 秒检查点，整体比上一版多约 36 秒），回 fastboot 后临时 TWRP 取 `boot-025-唯一名`；按最后落盘的 s12 检查点定位精确阻塞，再决定是复用 gmu_base、修 context 权限还是修别的真实兼容。
+4. 先修完 step12，才做自动 GPU 命令自检、Mesa/freedreno/EAGL 桌面接入（根 16.7.16 与 donor 16.5 的 vtable/槽位不同，禁止原样套注入库），最后 Wi-Fi；以真机点击/滑动/联网验收。编译/fastboot OKAY 一律不算成功。
+
 ## 2026-11-06 最终交接：已读 boot024，停止实验，手机留在 TWRP（本节覆盖旧状态）
 
 用户本轮明确要求立即读日志并交给下一位AI，额度/费用不足。已执行到此停止：没有再编译、没有再启动新实验、没有flash。禁止子Agent。下一位获得用户继续指令后再开展实验。
