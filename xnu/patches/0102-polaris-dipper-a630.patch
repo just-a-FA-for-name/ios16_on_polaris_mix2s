@@ -61,7 +61,7 @@ diff --git a/bsd/dev/mi8_adreno.c b/bsd/dev/mi8_adreno.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/mi8_adreno.c
-@@ -0,0 +1,4853 @@
+@@ -0,0 +1,4886 @@
 +/*
 + * The GPU of the Xiaomi Mi 8 (dipper, SDM845): an Adreno 630 (chip id 0x06030001, "qcom,chipid" of the phone's
 + * own device tree), woken step by step. Only with boot-arg mi8gpu=N, which performs steps 1 to N and stops.
@@ -1059,6 +1059,16 @@ new file mode 100644
 +		printf("mi8gpu: SMMU RESTORE FAILED to stop translation; retaining memory\n");
 +		return;
 +	}
++	/* Polaris (boot-027): the stream/context routing registers ignored writes
++	 * made while the context bank was still translating. The bank is now off and
++	 * its TLB idle, so repeat the three routing restores before the CB registers
++	 * are put back. The Dipper ordering works on its UEFI chain but not here. */
++	wr(smmu + SMMU_CBAR(GMU_CTX), smmu_old.cbar);
++	wr(smmu + SMMU_CBA2R(GMU_CTX), smmu_old.cba2r);
++	wr(smmu + SMMU_S2CR(GMU_SMR_ENTRY), smmu_old.s2cr);
++	__asm__ volatile ("dsb sy");
++	printf("mi8gpu: routing restored after TLB drain: CBAR %#010x S2CR %#010x\n",
++	    rd(smmu + SMMU_CBAR(GMU_CTX)), rd(smmu + SMMU_S2CR(GMU_SMR_ENTRY)));
 +	wr(cb + CB_TCR, smmu_old.tcr);
 +	wr(cb + CB_TCR2, smmu_old.tcr2);
 +	wr(cb + CB_TTBR0_LO, smmu_old.ttbr0_lo);
@@ -1340,11 +1350,21 @@ new file mode 100644
 +	root = kvtophys((vm_offset_t)l1);
 +	l1[(g3d_regions[0].address >> 30) & 0x1ff] = kvtophys((vm_offset_t)l2) | PTE_TABLE;
 +	uint32_t next_l3 = 2;
++	uint64_t cached_l2 = 0;
++	uint64_t *cached_l3 = NULL;
++	static const char *const region_checkpoints[] = {
++		"g3d: region sqe built", "g3d: region ring built",
++		"g3d: region memptrs built", "g3d: region screen built",
++	};
++	/* boot-026 stopped inside this loop with the system still alive. The screen
++	 * region is ~2370 pages; the original code resolved the same level-3 table
++	 * with kvtophys() on every page. Resolve it once per 2 MiB slot instead. */
 +	for (uint32_t r = 0; r < G3D_REGIONS; r++) {
 +		struct g3d_region *g = &g3d_regions[r];
++		uint64_t region_phys = g->memory ? kvtophys(g->memory) : g->phys;
 +
 +		for (uint32_t off = 0; off < g->size; off += 0x1000) {
-+			uint64_t va = g->address + off, pa = g->memory ? kvtophys(g->memory) + off : g->phys + off;
++			uint64_t va = g->address + off, pa = region_phys + off;
 +			uint64_t *entry = &l2[(va >> 21) & 0x1ff];
 +
 +			if (*entry == 0) {
@@ -1353,13 +1373,24 @@ new file mode 100644
 +					g3d_free();
 +					return false;
 +				}
-+				*entry = kvtophys(g3d_tables + 0x1000 * next_l3++) | PTE_TABLE;
-+			}
-+			l3 = NULL;
-+			for (uint32_t t = 2; t < next_l3; t++) {
-+				if (kvtophys(g3d_tables + 0x1000 * t) == (*entry & PTE_ADDRESS)) {
-+					l3 = (uint64_t *)(g3d_tables + 0x1000 * t);
++				cached_l3 = (uint64_t *)(g3d_tables + 0x1000 * next_l3);
++				*entry = kvtophys((vm_offset_t)cached_l3) | PTE_TABLE;
++				next_l3++;
++			} else if (*entry != cached_l2 || cached_l3 == NULL) {
++				cached_l3 = NULL;
++				for (uint32_t t = 2; t < next_l3; t++) {
++					if (kvtophys(g3d_tables + 0x1000 * t) == (*entry & PTE_ADDRESS)) {
++						cached_l3 = (uint64_t *)(g3d_tables + 0x1000 * t);
++						break;
++					}
 +				}
++			}
++			cached_l2 = *entry;
++			l3 = cached_l3;
++			if (l3 == NULL) {
++				printf("mi8gpu: level-3 table for %#llx not found\n", va);
++				g3d_free();
++				return false;
 +			}
 +			l3[(va >> 12) & 0x1ff] = pa | PTE_GMU | PTE_AP_UNPRIV | PTE_PAGE;
 +			pages++;
@@ -1367,8 +1398,10 @@ new file mode 100644
 +		if (g->memory) {
 +			to_memory(g->memory, round_page(g->size));
 +		}
-+		printf("mi8gpu: the 3D core will see %#llx..%#llx (%s) in memory at %#llx\n", g->address, g->address + g->size - 1,
-+		    g->name, g->memory ? kvtophys(g->memory) : g->phys);
++		printf("mi8gpu: the 3D core will see %#llx..%#llx (%s) in memory at %#llx (%u pages done)\n",
++		    g->address, g->address + g->size - 1, g->name, region_phys, pages);
++		polaris_gpu_checkpoint(r < sizeof(region_checkpoints) / sizeof(region_checkpoints[0]) ?
++		    region_checkpoints[r] : "g3d: region built");
 +	}
 +	polaris_gpu_checkpoint("g3d: page tables built");
 +	to_memory(g3d_tables, round_page(G3D_TABLE_POOL));
