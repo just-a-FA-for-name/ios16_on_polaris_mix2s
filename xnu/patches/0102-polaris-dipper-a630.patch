@@ -61,7 +61,7 @@ diff --git a/bsd/dev/mi8_adreno.c b/bsd/dev/mi8_adreno.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/mi8_adreno.c
-@@ -0,0 +1,4886 @@
+@@ -0,0 +1,4913 @@
 +/*
 + * The GPU of the Xiaomi Mi 8 (dipper, SDM845): an Adreno 630 (chip id 0x06030001, "qcom,chipid" of the phone's
 + * own device tree), woken step by step. Only with boot-arg mi8gpu=N, which performs steps 1 to N and stops.
@@ -4807,6 +4807,29 @@ new file mode 100644
 +
 +extern bool polaris_touch_i2c_board(void);
 +
++/* Polaris: mi8_adreno_init() is called on the UFS/root init thread
++ * (bsd/dev/sweet_ufs.c), not from a late IOKit probe as on the Dipper chain.
++ * Running the 21 GPU steps there blocks the root device before launchd starts
++ * (boot-028: the console ring still held the previous boot verbatim). Use the
++ * same delayed kernel thread that the proven mi8gpu=N probe uses. */
++static void
++mi8_gpu_auto_thread(void *parameter, __unused wait_result_t result)
++{
++	uint32_t delay_s = 20;
++
++	(void)parameter;
++	(void)PE_parse_boot_argn("mi8gpu_delay", &delay_s, sizeof(delay_s));
++	if (delay_s == 0 || delay_s > 60) {
++		delay_s = 20;
++	}
++	printf("mi8gpu: automatic startup on its own thread, waiting %u s\n", delay_s);
++	for (uint32_t i = 0; i < delay_s; i++) {
++		sleep_us(1000000);
++	}
++	mi8_gpu_start_by_itself();
++	thread_terminate(current_thread());
++}
++
 +void
 +mi8_adreno_init(void)
 +{
@@ -4818,7 +4841,11 @@ new file mode 100644
 +	}
 +	if (!PE_parse_boot_argn("mi8gpu", &last, sizeof(last)) || last == 0) {
 +		if (PE_parse_boot_argn("gpu", &only, sizeof(only)) && only) {
-+			mi8_gpu_start_by_itself();
++			if (kernel_thread_start(mi8_gpu_auto_thread, NULL, &thread) == KERN_SUCCESS) {
++				thread_deallocate(thread);
++			} else {
++				printf("mi8gpu: automatic startup: no kernel thread\n");
++			}
 +		}
 +		return;
 +	}

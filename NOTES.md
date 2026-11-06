@@ -1,3 +1,49 @@
+## 2026-11-06 21:55 续轮：前四轮测的是 gpu=0 探针，已打 gpu=1 正式镜像并修 g3d/restore（本节覆盖下方所有旧状态）
+
+- 关键纠正：`boot-024..027` cmdline 均为 `gpu=0 mi8gpu=21|12`，是 Dipper 分阶段探针，跑完 teardown，GPU 服务从不启动；`gpu=1` 且无 `mi8gpu` 才走 `mi8_gpu_start_by_itself()` → step1..21 → `RedwoodGPUStart()`。
+- 与 Dipper 原版（`polaris/out/donor-mi8_adreno.c`，从 `xnu-mi8.patch` 还原）逐行 diff：32 个 hunk 全是我们加的诊断/开关，寄存器写入与 step/restore 顺序逐行一致，排除"抄错驱动"。
+- boot-026 最后 GPU 输出 `g3d: allocations done`，卡在 g3d 页表循环（screen 约 2370 页、每页重复 kvtophys、l3 无 NULL 保护）；boot-027 restore 在 SCTLR.M=1 时写 S2CR/CBAR 被忽略。
+- 修复（`15941e1`）：TLB drain 后重放 CBAR/CBA2R/S2CR；g3d 缓存 L3 指针、NULL 保护、4 个 per-region 检查点。0102 重导 698069 B，重放 14/14 一致，旧版备份 `out/0102-pre-gpu1-fix-20261106.patch`。
+- `gpu=1` 镜像 `out/ci-42223577049-gpu1/shim-polaris-dipper-checkpoint.img` SHA `1343aad0…`（同内核 `0103e134…`，cmdline 466 B，无探针/无 trace_ms）；`boot-028-gpu1` 上机中。新 CI `42228766676`（head `15941e1`）。
+- 未 flash、未宣布成功；GPU/Wi-Fi/蓝牙仍待验。
+
+## 2026-11-06 21:42 续轮：boot-026/027 定位 SMMU 流表寄存器写不回；GPU 仍未通（本节覆盖下方所有旧状态）
+
+**用户可见状态：GPU 依旧没用、桌面仍被覆盖，与最初版本无区别；如实记录，不宣称成功。** 完整表格/路线见 `../给下一个AI的交接.md` 同名章节。禁止子Agent，大文件全在 F 盘，未 flash。
+
+| 日志 | 结论 |
+|---|---|
+| boot-025 | 18 个检查点证明 step12 主体全通（13 页 ATOS 0 错、context/stream 回读全对），最后 `s12: page translations done` 后静默 |
+| boot-026 | 修复版 `8f2ab68` / CI `42223577049` / 镜像 `599aa3e6…`：holes 跳过生效，进入 `g3d_smmu_setup` 并走到 `g3d: allocations done`；**系统 SpringBoard 持续运行，只有 GPU 线程停住** |
+| boot-027 | 同内核只改 `mi8gpu=12`（镜像 `c5d8dd6c…`）：`step 12: done` → teardown → `mi8gpu: over (mi8gpu=12)`，系统继续 SpringBoard/searchd；**`SMMU restoration FAIL`** |
+
+### 硬阻塞（新根因）
+`gmu_smmu_restore()` 写 `SMMU_S2CR(0)` = `0x200ff` 读回 `0x2`；写 `SMMU_CBAR(2)` = `0` 读回 `0x1f300`。`SMR(0)`/`CB_SCTLR` 写 0 成功，sCR0 全程 `0x00200626`（SMMUEN=0）、sGFSR=0。**S2CR/CBAR 写不回去**：首次能写非 0，之后无法改回。后果：探测一绑定 stream 0 就无法撤销 → 显示 DMA 被持续劫持（用户看到的「编码覆盖桌面」）；「配置→恢复」路线本身永久污染显示。Dipper 用 UEFI 启动链、Polaris 用 HyperOS ABL，属启动链/TZ 安全属性差异，不是驱动抄错。
+
+### 状态与下一步
+手机留在临时 TWRP，未 flash；内核 `0103e134…`，两份镜像 `599aa3e6…`/`c5d8dd6c…`；源码 `646f7a0`、`8f2ab68` 仅推实验分支，未动 main。别再盲目加检查点/重跑镜像：先只读确认 SMMU SCR0 与 TZ 归属，再在 A（不写全局流表，但无法启用 GMU）/ B（启动链安全配置，高风险）/ C（回退到可正常显示配置）之间定方向。GPU/Wi‑Fi/蓝牙/墙纸/流畅度均未修好。
+
+## 2026-11-06 21:12 续轮：boot-025 证明 step12 全跑通，修复版 CI 42223577049 进行中（本节覆盖下方所有旧状态）
+
+**最深实机证据：`boot-025-dipper-step12-diag.txt`（3296 行 / 环 234831B / flush #84 / SHA `bd31fe41…`），step12 的 18 个检查点全部落盘。** GPU/流畅度/Wi‑Fi 仍未修好，未 flash，不宣布成功。禁止子Agent，大文件全在 F 盘。完整表格见 `../给下一个AI的交接.md` 同名章节。
+
+| 项 | 结果 |
+|---|---|
+| step1..11 | 全 done；GMU 固件 8192 字回读 0 错 |
+| step12 | 第三次 GMU 重映射成功；`SMMU idle check: reset 0x1 GX 0x222001 S2CR 0x200ff CBAR 0` → idle PASS；页表/region 分配成功；context bank 2 回读全对（`CBAR 0x1f300 SCTLR 0x1027 TTBR0 0x00020001bcba0000`）；stream 0 `SMR 0x80000005 S2CR 2`；**13 页 ATOS 翻译 0 错** |
+| 最后落盘 | `s12: page translations done` + 一条 vsync，之后整机静默；无 `step 12: done`、HFI、fence、teardown |
+| 阻塞区间 | 收窄到 step12 尾部：未映射 IOVA `0x60100000` 的 ATOS 负例探测（第一条 `ATOS request` 都没出现），或紧随的 `g3d_smmu_setup()`（`gmu_last_step=21>=20` 自动调用）。Dipper 原版 `xnu-mi8.patch` 1948-1963 行确认是原设计 |
+
+### 用户实机反馈 / 我的问题
+用户看到「一堆编码覆盖桌面」：桌面起来了但被十六进制文本盖住。成因是**本版诊断输出没收敛**（234831B = boot024 的 5 倍，每页 ATOS 两行），console 文本被画到 framebuffer；`serial_console.c:276` 的 `sweet_console_muted` 在 GUI present 后静音，但 panic 会恢复绘制。这是诊断输出问题，不是显示驱动被改坏（本轮寄存器写入一个没动）。已认并在修复版默认关闭逐页 ATOS 打印。
+
+### 修复版 `8f2ab68`（实验分支 `ci-fork/polaris-dipper-gpu-20261106`，未动 main）
+- `mi8_adreno.c`：逐页 ATOS request/result 打印改 `mi8gpu_atos_verbose=1` 才输出（TIMEOUT/refuse 错误仍打）；step12 尾部 `holes` 负例探测改 `mi8gpu_holes=1` 才执行（默认跳过）并加 3 个检查点；`g3d_smmu_setup()` 加 8 个检查点、其 holes 同样默认跳过。**未改任何寄存器写入，未绕过 idle/ownership 检查。**
+- 验证：339 printf 格式符核对（2 处旧代码条件表达式误报）、花括号 850/850、0102 重导 696447B（备份 `out/0102-pre-boot025-fix-20261106.patch`）、GNU patch 完整重放 14/14 规范化一致。
+- CI `42223577049`（head `8f2ab68`）进行中。后续用 `download_ci_kernel_fast.py` → `prepare_dipper_artifacts.py` → `build_dipper_checkpoint_image_win.py` → `verify_dipper_payload.py --probe` → 临时 `fastboot boot` → 看门狗取 **`boot-026-…` 唯一名** → `analyze_dipper_step12.py`（EXPECTED 已同步新 g3d 检查点）。
+
+设备：手机现留在临时 TWRP（看门狗 21:04 自动 `fastboot boot backup-20261104/recovery.img`），未 flash；boot 仍原 HyperOS，userdata iOS HFS，备份/GPT/bootloader/modem/persist/recovery 未改。
+
 ## 2026-11-06 20:58 续轮：step12 诊断版已编译、打包、临时上机；boot-025 待取（本节覆盖下方所有旧状态）
 
 用户要求继续、不停。本轮把上一轮纯诊断检查点真正做成内核并临时启动。**GPU/整体流畅度/Wi‑Fi/蓝牙仍未修好，未 flash，未宣布成功，未动 main 分支。** 禁止子Agent，大文件全在 F 盘。完整证据、工具链与接手点见 `../给下一个AI的交接.md` 同名章节。
