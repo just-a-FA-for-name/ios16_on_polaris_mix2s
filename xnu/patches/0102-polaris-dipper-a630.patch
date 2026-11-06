@@ -61,7 +61,7 @@ diff --git a/bsd/dev/mi8_adreno.c b/bsd/dev/mi8_adreno.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/mi8_adreno.c
-@@ -0,0 +1,4928 @@
+@@ -0,0 +1,4947 @@
 +/*
 + * The GPU of the Xiaomi Mi 8 (dipper, SDM845): an Adreno 630 (chip id 0x06030001, "qcom,chipid" of the phone's
 + * own device tree), woken step by step. Only with boot-arg mi8gpu=N, which performs steps 1 to N and stops.
@@ -1312,13 +1312,27 @@ new file mode 100644
 +	vm_offset_t cb = smmu_cb(G3D_CTX);
 +	polaris_gpu_checkpoint("g3d: enter");
 +	uint32_t wrong = 0, pages = 0, smr_value = SMMU_SMR_VALID | G3D_STREAM;
++	uint32_t screen_opt = 0, bind_stream = 0;
 +	uint64_t fw_size = 0;
++
++	/* boot-026/032: this function always stopped the machine on Polaris.
++	 * Mapping the panel's framebuffer into the 3D core and binding stream 0
++	 * are the only two things here that can disturb display DMA. Keep both
++	 * opt-in; the page tables and the context bank are still built. */
++	(void)PE_parse_boot_argn("mi8gpu_screen", &screen_opt, sizeof(screen_opt));
++	(void)PE_parse_boot_argn("mi8gpu_g3d_bind", &bind_stream, sizeof(bind_stream));
++	if (!screen_opt) {
++		g3d_regions[G3D_REGIONS - 1].size = 0;
++	}
++	polaris_gpu_checkpoint("g3d: before fw lookup");
 +	const uint8_t *fw = redwood_wifi_file("a630_sqe.fw", &fw_size);
++	polaris_gpu_checkpoint("g3d: fw lookup done");
 +
 +	if (fw == NULL || fw_size <= G3D_SQE_FILE_SKIP || fw_size - G3D_SQE_FILE_SKIP > g3d_regions[0].size) {
 +		printf("mi8gpu: a630_sqe.fw missing or not the expected size (%llu)\n", fw_size);
 +		return false;
 +	}
++	polaris_gpu_checkpoint("g3d: before idle MMIO reads");
 +	if (smmu_num_cb <= G3D_CTX || smmu_num_smr <= G3D_SMR_ENTRY || rd(smmu + SMMU_SMR(G3D_SMR_ENTRY)) != 0 ||
 +	    rd(cb + CB_SCTLR) != 0 || rd(cb + CB_TTBR0_LO) != 0 ||
 +	    (rd(smmu + SMMU_S2CR(G3D_SMR_ENTRY)) != 0x200ff && rd(smmu + SMMU_S2CR(G3D_SMR_ENTRY)) != G3D_CTX)) {
@@ -1326,6 +1340,7 @@ new file mode 100644
 +		    G3D_CTX, rd(smmu + SMMU_SMR(G3D_SMR_ENTRY)), rd(smmu + SMMU_S2CR(G3D_SMR_ENTRY)), rd(cb + CB_SCTLR));
 +		return false;
 +	}
++	polaris_gpu_checkpoint("g3d: idle checks passed");
 +	printf("mi8gpu: a630_sqe.fw: %llu bytes, first words %08x %08x %08x %08x\n", fw_size, ((const uint32_t *)fw)[0],
 +	    ((const uint32_t *)fw)[1], ((const uint32_t *)fw)[2], ((const uint32_t *)fw)[3]);
 +	polaris_gpu_checkpoint("g3d: before table allocation");
@@ -1439,20 +1454,24 @@ new file mode 100644
 +	for (int i = 0; i < 100 && (rd(cb + CB_TLBSTATUS) & 1); i++) {
 +		sleep_us(10);
 +	}
++	polaris_gpu_checkpoint("g3d: before SCTLR on / stream bind");
 +	wr(cb + CB_SCTLR, SCTLR_ON);
 +	wr(smmu + SMMU_S2CR(G3D_SMR_ENTRY), G3D_CTX);
-+	wr(smmu + SMMU_SMR(G3D_SMR_ENTRY), smr_value);
++	if (bind_stream) {
++		wr(smmu + SMMU_SMR(G3D_SMR_ENTRY), smr_value);
++	}
 +	polaris_gpu_checkpoint("g3d: context written");
 +	printf("mi8gpu: 3D core context bank %u: CBAR %#010x SCTLR %#010x TTBR0 %#010x%08x; entry %u SMR %#010x S2CR %#010x\n", G3D_CTX,
 +	    rd(smmu + SMMU_CBAR(G3D_CTX)), rd(cb + CB_SCTLR), rd(cb + CB_TTBR0_HI), rd(cb + CB_TTBR0_LO), G3D_SMR_ENTRY,
 +	    rd(smmu + SMMU_SMR(G3D_SMR_ENTRY)), rd(smmu + SMMU_S2CR(G3D_SMR_ENTRY)));
-+	if (rd(smmu + SMMU_SMR(G3D_SMR_ENTRY)) != smr_value || (rd(smmu + SMMU_S2CR(G3D_SMR_ENTRY)) & 0x300ff) != G3D_CTX ||
++	if ((bind_stream && rd(smmu + SMMU_SMR(G3D_SMR_ENTRY)) != smr_value) ||
++	    (rd(smmu + SMMU_S2CR(G3D_SMR_ENTRY)) & 0x300ff) != G3D_CTX ||
 +	    !(rd(cb + CB_SCTLR) & 1)) {
 +		printf("mi8gpu: the SMMU did not take what was written for the 3D core\n");
 +		return false;
 +	}
-+	for (uint32_t r = 0; r < G3D_REGIONS; r++) {
 +	polaris_gpu_checkpoint("g3d: before ATOS checks");
++	for (uint32_t r = 0; r < G3D_REGIONS; r++) {
 +		uint32_t prior = wrong;
 +
 +		for (uint32_t off = 0; off < g3d_regions[r].size; off += (g3d_regions[r].phys ? 0x1000 * 97 : 0x1000)) {

@@ -1,3 +1,26 @@
+## 2026-11-06 23:13 续轮：boot-033 = 跳过 g3d 能进桌面但纯软渲染；g3dopt 待 CI（本节覆盖下方所有旧状态）
+
+- boot-033（288290 B / flush #147，`gpu=1 mi8gpu_steps=19`）：`auto step 19 done`，SpringBoard 643 行、16 次 `SWEET FB: swap`、60 Hz vsync 正常，末尾 `THE GPU IS NOT STARTED; the system draws with its software renderer`。21 步的 boot-032 则 `g3d: enter` 后整机静默 → `g3d_smmu_setup()` 是唯一硬阻塞，跳过它只能进软渲染桌面。
+- 不能跳过：`g3d_ready` 是 CP/zap 前提，`g3d_tables` 供 `keep_map()`。
+- `g3dopt` 版 0102：701014 B / SHA `cb95e4e7…`，14/14 重放一致，备份 `out/0102-pre-g3dopt-20261106.patch`。g3d 加 fw lookup / idle MMIO / context writes 检查点；`mi8gpu_screen`、`mi8gpu_g3d_bind` 默认 0（不映射 framebuffer、不绑定 stream 0 SMR），页表/context bank 仍建。
+- 下一步：实验分支 commit → CI → 下载内核 → 打包 `gpu=1 mi8gpu_trace_ms=100 ufslogsecs=1` → `boot-034-g3dopt` 定位精确挂点 → 再验 `gpu_kept` / `RedwoodGPUStart()`。
+- 未 flash、未宣布成功；GPU/Wi-Fi/蓝牙/桌面加速均未修好。
+
+## 2026-11-06 23:00 续轮：boot-032 把挂点钉死在 g3d_smmu_setup；纠正"两套驱动"误判（本节覆盖下方所有旧状态）
+
+- **纠错**：`redwood_adreno.c` 的 SC7280 后端在 `#else` 分支，CI 带 `-DARM64_BOARD_CONFIG_SWEET` 故完全不编译；内核无 `adreno: steps up to`。`gpu=1` 只被 mi8_adreno.c 读，`adreno=0` 无读取者；boot-030/031 差异是日志落盘时机。
+- boot-032（51264 B）：`auto step 1..11` 全 done，step12 全通（13 页翻译 0 错），`s12: calling g3d_smmu_setup` → `g3d: enter` 后整机静默。**正式 21 步独有的 g3d_smmu_setup 是阻塞点**；boot-029 的 19 步（不触发 g3d）系统存活。
+- 不能简单跳过：`g3d_ready` 是 `gpu_cp_start()`/`gpu_zap_and_command()` 前提，`g3d_tables` 是 `keep_map()` 用的页表，`gpu_kept` 依赖 cp_ok。
+- 零编译验证：镜像 `out/ci-42234857891-s19/...img` SHA `90114d2c…`，cmdline `gpu=1 mi8gpu_steps=19 mi8gpu_trace_ms=100 ufslogsecs=1`，`boot-033-s19` 上机中。
+- 下一轮：g3d 内加细检查点 + screen region 可选化，定位/排除显示 DMA 冲突。未 flash、未宣布成功。
+
+## 2026-11-06 22:35 续轮：adreno=0 令系统走得更远，GPU 线程确已启动；已加逐步检查点（本节覆盖下方所有旧状态）
+
+- boot-031（新日志 20609 B）：launchd 到 `mount-phase-2`/`init-with-data-volume`/`MSUEarlyBootTask`，出现 `automatic startup on its own thread, waiting 20 s`；20 s 后跑 stale_stop 检查点，末行 `mi8gpu: stale CX` 截断后整机静默。adreno=0 有效，但正式 GPU 路径仍挂。
+- 改动 `f2d4ed8`：`mi8gpu_steps=N` 可配步数 + 每步 `auto: step begin/done` 检查点；`redwood_adreno_init()` 只认显式 `adreno_by_itself=1`，`gpu=1` 不再触发 SC7280 序列。0102 重导 700127 B，重放 14/14 一致。CI `42234857891`。
+- 下一步：新内核打 `gpu=1 adreno=0 mi8gpu_trace_ms=100 ufslogsecs=1` 取 boot-032，用最后一条 `auto step N` 定位挂点，再用 `mi8gpu_steps` 二分。
+- 未 flash、未宣布成功。
+
 ## 2026-11-06 22:25 续轮：gpu=1 卡死真因是两套 GPU 驱动同时触发（本节覆盖下方所有旧状态）
 
 - `gpu=1` 被 `mi8_adreno.c`（导入的 A630）和 `redwood_adreno.c:4140`（原有 SC7280/642L 驱动）**同时读取**；后者在根文件系统之前同步跑 21 步并等待，用错芯片的寄存器地图，把 `exec mount_hfs` 阶段卡死。boot-030（新日志 17697 B）launchd 已起但无任何 mi8gpu 行，停在 mount_hfs。
