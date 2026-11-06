@@ -1,3 +1,40 @@
+## 2026-11-06 最终交接：已读 boot024，停止实验，手机留在 TWRP（本节覆盖旧状态）
+
+用户本轮明确要求立即读日志并交给下一位AI，额度/费用不足。已执行到此停止：没有再编译、没有再启动新实验、没有flash。禁止子Agent。下一位获得用户继续指令后再开展实验。
+
+### 最重要的新证据
+32MiB I/O修复+两秒检查点版仍不能进系统，用户等很久后回fastboot。已临时启动备份TWRP，读取并保存：
+- device-private/logs/boot-024-dipper-checkpoint.bin、.txt；环记录46183B，flush42；解码文本46721B，SHA256 c7ca99d042a7b740472e83db4a223a2990b810d9a6860a42c0ba5b7888059362。
+- 与boot023摘要不同，是新日志；另有 boot-024-dipper-checkpoint-summary.json。
+- 日志明确有第1至11步全部done，已经走过GCC/RPMh/GPUCC/CX/时钟/GMU寄存器/SMMU初读/TCM测试/固件拷贝/RSC-PDC配置。
+- GMU固件回读：0 of8192 words wrong，word sum0xe19e48be。证明固件被写入TCM并回读一致，不能说固件已执行、GMU已启动或GPU可渲染。
+- 最后保存：step11 done -> step12 -> checkpoint probe: before next step；没有step12 done，没有SMMU idle check那行，也没有第13步、HFI初始化完成、GPU fence/selftest成功。
+- 新版比旧版获得更深入证据，但尚不能把推进归因于32MiB单独一项：同时加入了落盘等待，并移除了旧汇总printf里的重复寄存器读取。
+
+### 下一位直接从这里接手
+源文件 polaris/out/dipper-gpu-xnu/xnu/bsd/dev/mi8_adreno.c：step_gmu_smmu约1334行，第一批操作是条件检查、smmu_cb(GMU_CTX)，然后调用gmu_smmu_idle约1034行。
+gmu_smmu_idle先ml_io_map(GMU_PHYS0x0506a000,GMU_SIZE0x30000)，再读SMMU_CBAR(GMU_CTX)、SMMU_S2CR(GMU_SMR_ENTRY)，随后汇总printf又读取GMU reset和GX状态，才打印SMMU idle check。当前日志没有这行。
+建议优先在step12入口、上述映射和逐次读取、分配页表前后加相隔可落盘的细分检查点，核实context bank/SMR索引、映射额度和权限，确定卡在哪里。记录旧日志1秒未落盘尾部的不确定性：最后入口检查点不等于准确故障指令，不能硬说某次SMMU写已经执行。不要盲改SMR/S2CR/CBAR或跳过idle/ownership检查。先核实具体映射/读操作，再修真实兼容。当前已完成1..11，不必重做核数/裁切/10Hz/GPU-off反复测试。
+
+### 本次源码和产物（全部保留）
+Dipper原始参考 polaris/out/research-dipper-xnu，固定4e82c709ea42ebb509fa101b52972fdc890b873e。0102已包含真实A630/RedwoodGPU/Mini显示接口、缺失MiniDrivers头、四个类名隔离、SWEET仅转发至mi8_gpu的bridge、诊断检查点和io_map.c32MiB。
+关键源码提交：0ba2a40补头；e635bd0类名隔离；12185d0修APFS/UEFI加载器依赖；2649e92检查点；8f0c3d15d25a6f956d16d5d0261a25ecfaeb955a补Dipper遗漏的8->32MiB I/O窗口。仓库当前分支polaris-keys-0094；远端实验ci-fork/polaris-dipper-gpu-20261106。其后本地提交主要是文档，git log为准。
+CI42208721325成功，kernel12489208B SHA ba94d1d709a619c8d86d9d58c71c9eac7322d7f33bc48263b56c51f38c7f04e1。
+镜像 polaris/out/ci-42208721325/shim-polaris-dipper-checkpoint.img18333696B SHA c86fd4406bf0b86fe3dbc81a23abaed7700decd7a75298d8e842442617c5e0be。
+完整8核/约5.2GiB/完整1125x2436到1080x2160/60Hz目标/三键；四个本机固件均匹配，blob/边界/独立解包验证见同目录dipper-preflight.json及kernel验证报告。参数gpu=0 mi8gpu=21 mi8gpu_delay=20 ufslogsecs=1 mi8gpu_trace_ms=2000：真实分阶段GPU探测，不是GPU-off控制；完成后走teardown，不是桌面加速接管。
+旧12185d0 GPU-off对照可进系统：out/dipper-control-42202872508/shim-polaris-dipper-gpu-off.img，SHA f34062fd32bda61b0dde79ae47d0f86b9a867e66e816cb995c6a13181ae15719。它仍卡、缺驱动，仅用于回退，不是成品。
+
+### 用户态已构建，但没有安装/启用GPU渲染
+polaris/out/dipper-userland-20261106/validation.json记录来源/摘要；Mesa/freedreno25.0.7、AIR、EAGL349696B、gl_test70016B均实际编译，四个相关二进制CodeDirectory页哈希已全部校验。WSL /opt/polaris-dipper-userland，THEOS=/opt/polaris-dipper-theos；SDK8867文件/tree81466d46...校验通过。build_dipper_mesa.sh和build_dipper_eagl.sh在wifi-port。
+当前根iOS16.7.16/20H392，Dipper原用户态16.5，不能直接套注入地址或对象布局。device-private/dipper-graphics-abi-20H392.json已从本机缓存核实九个相关方法；begin_update/finish_update槽位170/178->178/180。仍需完整验证后才接Mini显示/Mesa/EAGL。大库不能直接塞现有受ABL限制的boot payload，需审查正常VFS安装通道，不要raw写HFS。
+墙纸、整体流畅度、Wi-Fi、蓝牙仍未完成，不能写成功。以前的内存/按键修复已实机有效，不要重复；更早@executable_path失败属于历史，之后已有absolute/diagnostic阶段记录，先看最新状态不要按旧笔记盲回退。
+
+### 当前设备和继续命令
+手机现在留在临时TWRP，adb serial7f9594af，最后再次枚举应为recovery。boot仍原HyperOS，userdata已iOS HFS；不能普通启动Android或格式化data。分区备份backup-20261104保留，未改GPT/bootloader/recovery/modem/persist。所有大文件用F机械盘；不使用子Agent。
+工具 D:/AI workspace/android-tools/platform-tools/{adb,fastboot}.exe；临时TWRP backup-20261104/recovery.img；等待用adb wait-for-recovery。
+日志 wifi-port/pull_ios_log.py --serial 7f9594af boot-025-新的唯一名字。CI用github_workflow.py/ci_status_once.py；绝不输出GCM凭据。成功后prepare_dipper_artifacts.py RUN，WSL运行build_dipper_checkpoint_image.sh RUN，再独立校验。打包目标/文件拒绝覆盖；新一轮用新RUN/目录。
+当前已有源工作树包含本次补丁；修改后wifi-port/build_dipper_gpu_patch.py重导0102，并对out/dipper-gpu-baseline/xnu执行git apply --check。不要只改被忽略工作树而不导出补丁。下一位先分析boot024及step12，然后才决定下一版；本轮已经停止。
+
 ## CURRENT 2026-11-06：32MiB修复内核已临时启动，等待实机结果（本节优先）
 
 - CI42208721325成功，源码8f0c3d15d25a6f956d16d5d0261a25ecfaeb955a。导入遗漏的Dipper osfmk/arm/io_map.c32MiB窗口，包含2649e92逐操作检查点及空映射处理。旧8MiB自动GPU版和延迟探测版均无法进入系统；同一旧内核GPU-off对照可进入。新修复尚未收到实机反馈，不能宣称GPU/流畅度已修复。
