@@ -11150,7 +11150,7 @@ new file mode 100644
 +static_assert(offsetof(struct minisurf_shared, attachments) == 0x30, "shared layout");
 +static_assert(sizeof(struct minisurf_result) + 20 * sizeof(struct minisurf_plane) == MINISURF_RESULT_MAX, "result size");
 +
-+/* IOConnectCallMethod selectors of IOSurfaceRootUserClient (iOS 16.5) */
++/* IOConnectCallMethod selectors of DipperSurfaceRootUserClient (iOS 16.5) */
 +enum {
 +	kSurfaceMethodCreate            = 0,
 +	kSurfaceMethodLookup            = 4,
@@ -11962,23 +11962,23 @@ new file mode 100644
 +
 +/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 +
-+class IOCoreSurfaceRoot : public IOService
++class DipperCoreSurfaceRoot : public IOService
 +{
-+	OSDeclareDefaultStructors(IOCoreSurfaceRoot);
++	OSDeclareDefaultStructors(DipperCoreSurfaceRoot);
 +
 +public:
 +	virtual bool start(IOService * provider) APPLE_KEXT_OVERRIDE;
 +};
 +
-+OSDefineMetaClassAndStructors(IOCoreSurfaceRoot, IOService);
++OSDefineMetaClassAndStructors(DipperCoreSurfaceRoot, IOService);
 +
 +bool
-+IOCoreSurfaceRoot::start(IOService * provider)
++DipperCoreSurfaceRoot::start(IOService * provider)
 +{
 +	if (!IOService::start(provider)) {
 +		return false;
 +	}
-+	setProperty(kIOUserClientClassKey, "IOSurfaceRootUserClient");
++	setProperty(kIOUserClientClassKey, "DipperSurfaceRootUserClient");
 +	setName("IOCoreSurfaceRoot");
 +	registerService();
 +	return true;
@@ -11987,7 +11987,7 @@ new file mode 100644
 +void
 +MiniIOSurfaceStart(IOService * provider)
 +{
-+	IOCoreSurfaceRoot * root;
++	DipperCoreSurfaceRoot * root;
 +
 +	gSurfaceLock = IOLockAlloc();
 +	gSurfaceKeptLock = IOLockAlloc();
@@ -11995,7 +11995,7 @@ new file mode 100644
 +		gSurfaceTraceOf[0] = 0;
 +	}
 +	gSurfaceClearing = thread_call_allocate(surfaceMemoryClear, NULL);
-+	root = OSTypeAlloc(IOCoreSurfaceRoot);
++	root = OSTypeAlloc(DipperCoreSurfaceRoot);
 +	if (root == NULL || !root->init() || !root->attach(provider)) {
 +		OSSafeReleaseNULL(root);
 +		IOLog("MiniIOSurface: cannot create the root service\n");
@@ -12019,9 +12019,9 @@ new file mode 100644
 +	bool            detached;               /* the client let go of it and will release shortly */
 +};
 +
-+class IOSurfaceRootUserClient : public IOUserClient
++class DipperSurfaceRootUserClient : public IOUserClient
 +{
-+	OSDeclareDefaultStructors(IOSurfaceRootUserClient);
++	OSDeclareDefaultStructors(DipperSurfaceRootUserClient);
 +
 +	task_t                          fTask;
 +	struct minisurf_client_ref *    fRefs;
@@ -12064,10 +12064,10 @@ new file mode 100644
 +	static mach_port_name_t makeSendRight(task_t task, MiniIOSurface * surface);
 +};
 +
-+OSDefineMetaClassAndStructors(IOSurfaceRootUserClient, IOUserClient);
++OSDefineMetaClassAndStructors(DipperSurfaceRootUserClient, IOUserClient);
 +
 +bool
-+IOSurfaceRootUserClient::initWithTask(task_t owningTask, void * securityID, UInt32 type, OSDictionary * properties)
++DipperSurfaceRootUserClient::initWithTask(task_t owningTask, void * securityID, UInt32 type, OSDictionary * properties)
 +{
 +	if (!IOUserClient::initWithTask(owningTask, securityID, type, properties)) {
 +		return false;
@@ -12077,17 +12077,17 @@ new file mode 100644
 +}
 +
 +bool
-+IOSurfaceRootUserClient::start(IOService * provider)
++DipperSurfaceRootUserClient::start(IOService * provider)
 +{
 +	if (!IOUserClient::start(provider)) {
 +		return false;
 +	}
-+	fTraps[kSurfaceTrapIncrementUseCount].func = (IOTrap) & IOSurfaceRootUserClient::trapIncrementUseCount;
-+	fTraps[kSurfaceTrapDecrementUseCount].func = (IOTrap) & IOSurfaceRootUserClient::trapDecrementUseCount;
-+	fTraps[kSurfaceTrapLock].func = (IOTrap) & IOSurfaceRootUserClient::trapLock;
-+	fTraps[kSurfaceTrapUnlock].func = (IOTrap) & IOSurfaceRootUserClient::trapUnlock;
-+	fTraps[kSurfaceTrapDetach].func = (IOTrap) & IOSurfaceRootUserClient::trapDetach;
-+	fTraps[kSurfaceTrapRelease].func = (IOTrap) & IOSurfaceRootUserClient::trapRelease;
++	fTraps[kSurfaceTrapIncrementUseCount].func = (IOTrap) & DipperSurfaceRootUserClient::trapIncrementUseCount;
++	fTraps[kSurfaceTrapDecrementUseCount].func = (IOTrap) & DipperSurfaceRootUserClient::trapDecrementUseCount;
++	fTraps[kSurfaceTrapLock].func = (IOTrap) & DipperSurfaceRootUserClient::trapLock;
++	fTraps[kSurfaceTrapUnlock].func = (IOTrap) & DipperSurfaceRootUserClient::trapUnlock;
++	fTraps[kSurfaceTrapDetach].func = (IOTrap) & DipperSurfaceRootUserClient::trapDetach;
++	fTraps[kSurfaceTrapRelease].func = (IOTrap) & DipperSurfaceRootUserClient::trapRelease;
 +	for (unsigned i = 0; i < kSurfaceTrapCount; i++) {
 +		fTraps[i].object = this;
 +	}
@@ -12095,7 +12095,7 @@ new file mode 100644
 +}
 +
 +IOReturn
-+IOSurfaceRootUserClient::clientClose(void)
++DipperSurfaceRootUserClient::clientClose(void)
 +{
 +	IOLockLock(gSurfaceLock);
 +	while (fRefCount != 0) {
@@ -12109,7 +12109,7 @@ new file mode 100644
 +}
 +
 +void
-+IOSurfaceRootUserClient::free(void)
++DipperSurfaceRootUserClient::free(void)
 +{
 +	if (fRefs != NULL) {
 +		if (gSurfaceLock != NULL) {
@@ -12127,7 +12127,7 @@ new file mode 100644
 +
 +/* All three with the lock held. */
 +struct minisurf_client_ref *
-+IOSurfaceRootUserClient::findRef(uint32_t sid, bool detached)
++DipperSurfaceRootUserClient::findRef(uint32_t sid, bool detached)
 +{
 +	for (uint32_t i = 0; i < fRefCount; i++) {
 +		if (fRefs[i].surface->sid == sid && fRefs[i].detached == detached) {
@@ -12138,7 +12138,7 @@ new file mode 100644
 +}
 +
 +struct minisurf_client_ref *
-+IOSurfaceRootUserClient::addRef(MiniIOSurface * surface)
++DipperSurfaceRootUserClient::addRef(MiniIOSurface * surface)
 +{
 +	struct minisurf_client_ref * ref;
 +	IOMemoryMap * map;
@@ -12174,7 +12174,7 @@ new file mode 100644
 +}
 +
 +void
-+IOSurfaceRootUserClient::dropRef(struct minisurf_client_ref * ref)
++DipperSurfaceRootUserClient::dropRef(struct minisurf_client_ref * ref)
 +{
 +	MiniIOSurface * s = ref->surface;
 +
@@ -12198,7 +12198,7 @@ new file mode 100644
 +
 +/* Describe the surface to the client. known: it has the surface already, do not build a second view. */
 +IOReturn
-+IOSurfaceRootUserClient::returnSurface(struct minisurf_client_ref * ref, bool known, IOExternalMethodArguments * args)
++DipperSurfaceRootUserClient::returnSurface(struct minisurf_client_ref * ref, bool known, IOExternalMethodArguments * args)
 +{
 +	MiniIOSurface * s = ref->surface;
 +	uint32_t size = resultSize(s);
@@ -12219,7 +12219,7 @@ new file mode 100644
 +}
 +
 +IOReturn
-+IOSurfaceRootUserClient::methodInit(IOExternalMethodArguments * args)
++DipperSurfaceRootUserClient::methodInit(IOExternalMethodArguments * args)
 +{
 +	struct {
 +		uint32_t allocAlignMask;
@@ -12258,7 +12258,7 @@ new file mode 100644
 +}
 +
 +IOReturn
-+IOSurfaceRootUserClient::methodCreate(IOExternalMethodArguments * args)
++DipperSurfaceRootUserClient::methodCreate(IOExternalMethodArguments * args)
 +{
 +	IOReturn ret;
 +	IOMemoryMap * inMap = NULL;
@@ -12413,7 +12413,7 @@ new file mode 100644
 +}
 +
 +IOReturn
-+IOSurfaceRootUserClient::methodLookup(IOExternalMethodArguments * args)
++DipperSurfaceRootUserClient::methodLookup(IOExternalMethodArguments * args)
 +{
 +	IOReturn ret = kIOReturnNotFound;
 +	uint32_t sid;
@@ -12439,7 +12439,7 @@ new file mode 100644
 +}
 +
 +IOReturn
-+IOSurfaceRootUserClient::methodLookupFromPort(IOExternalMethodArguments * args)
++DipperSurfaceRootUserClient::methodLookupFromPort(IOExternalMethodArguments * args)
 +{
 +	IOReturn ret;
 +	OSObject * obj = NULL;
@@ -12499,7 +12499,7 @@ new file mode 100644
 +}
 +
 +mach_port_name_t
-+IOSurfaceRootUserClient::makeSendRight(task_t task, MiniIOSurface * s)
++DipperSurfaceRootUserClient::makeSendRight(task_t task, MiniIOSurface * s)
 +{
 +	IOSurfaceSendRight * right;
 +	mach_port_name_t name = 0;
@@ -12521,11 +12521,11 @@ new file mode 100644
 +mach_port_name_t
 +MiniIOSurfaceMakeSendRight(task_t task, MiniIOSurface * surface)
 +{
-+	return IOSurfaceRootUserClient::makeSendRight(task, surface);
++	return DipperSurfaceRootUserClient::makeSendRight(task, surface);
 +}
 +
 +IOReturn
-+IOSurfaceRootUserClient::methodCreatePort(IOExternalMethodArguments * args)
++DipperSurfaceRootUserClient::methodCreatePort(IOExternalMethodArguments * args)
 +{
 +	MiniIOSurface * s;
 +	mach_port_name_t name;
@@ -12562,7 +12562,7 @@ new file mode 100644
 +}
 +
 +IOReturn
-+IOSurfaceRootUserClient::methodSetValue(IOExternalMethodArguments * args, const uint8_t * in, size_t inSize)
++DipperSurfaceRootUserClient::methodSetValue(IOExternalMethodArguments * args, const uint8_t * in, size_t inSize)
 +{
 +	uint32_t sid, seed = 0;
 +	OSObject * obj;
@@ -12607,7 +12607,7 @@ new file mode 100644
 +}
 +
 +IOReturn
-+IOSurfaceRootUserClient::methodRemoveValue(IOExternalMethodArguments * args, const uint8_t * in, size_t inSize)
++DipperSurfaceRootUserClient::methodRemoveValue(IOExternalMethodArguments * args, const uint8_t * in, size_t inSize)
 +{
 +	uint32_t sid, seed = 0;
 +	struct minisurf_client_ref * ref;
@@ -12638,7 +12638,7 @@ new file mode 100644
 +
 +/* The reply: 4 bytes unused, the seed, then the serialized value (a dictionary when all were asked for). */
 +IOReturn
-+IOSurfaceRootUserClient::methodCopyValue(IOExternalMethodArguments * args, const uint8_t * in, size_t inSize)
++DipperSurfaceRootUserClient::methodCopyValue(IOExternalMethodArguments * args, const uint8_t * in, size_t inSize)
 +{
 +	uint32_t sid, header[2] = { 0, 0 };
 +	struct minisurf_client_ref * ref;
@@ -12703,7 +12703,7 @@ new file mode 100644
 + * The request: the structure, its size, a mask of the fields that changed, the surface number.
 + */
 +IOReturn
-+IOSurfaceRootUserClient::methodSetBulkAttachments(const uint8_t * in, size_t inSize)
++DipperSurfaceRootUserClient::methodSetBulkAttachments(const uint8_t * in, size_t inSize)
 +{
 +	static const struct {
 +		uint8_t from, to;
@@ -12743,7 +12743,7 @@ new file mode 100644
 +}
 +
 +IOReturn
-+IOSurfaceRootUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments * args,
++DipperSurfaceRootUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments * args,
 +    IOExternalMethodDispatch * dispatch, OSObject * target, void * reference)
 +{
 +	const uint8_t * in = (const uint8_t *) args->structureInput;
@@ -12862,7 +12862,7 @@ new file mode 100644
 +/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 +
 +IOExternalTrap *
-+IOSurfaceRootUserClient::getTargetAndTrapForIndex(IOService ** targetP, UInt32 index)
++DipperSurfaceRootUserClient::getTargetAndTrapForIndex(IOService ** targetP, UInt32 index)
 +{
 +	if (index >= kSurfaceTrapCount) {
 +		return NULL;
@@ -12872,7 +12872,7 @@ new file mode 100644
 +}
 +
 +IOReturn
-+IOSurfaceRootUserClient::useCountCommon(uint32_t sid, uint32_t category, int delta)
++DipperSurfaceRootUserClient::useCountCommon(uint32_t sid, uint32_t category, int delta)
 +{
 +	struct minisurf_client_ref * ref;
 +	IOReturn ret = kIOReturnNotFound;
@@ -12897,13 +12897,13 @@ new file mode 100644
 +}
 +
 +IOReturn
-+IOSurfaceRootUserClient::trapIncrementUseCount(void * p1, void * p2, void * p3, void * p4, void * p5, void * p6)
++DipperSurfaceRootUserClient::trapIncrementUseCount(void * p1, void * p2, void * p3, void * p4, void * p5, void * p6)
 +{
 +	return useCountCommon((uint32_t) (uintptr_t) p1, (uint32_t) (uintptr_t) p2, 1);
 +}
 +
 +IOReturn
-+IOSurfaceRootUserClient::trapDecrementUseCount(void * p1, void * p2, void * p3, void * p4, void * p5, void * p6)
++DipperSurfaceRootUserClient::trapDecrementUseCount(void * p1, void * p2, void * p3, void * p4, void * p5, void * p6)
 +{
 +	return useCountCommon((uint32_t) (uintptr_t) p1, (uint32_t) (uintptr_t) p2, -1);
 +}
@@ -12913,7 +12913,7 @@ new file mode 100644
 + * What matters is the seed, which tells readers that the pixels may have changed.
 + */
 +IOReturn
-+IOSurfaceRootUserClient::lockCommon(uint32_t sid, uint32_t options, user_addr_t seedOut)
++DipperSurfaceRootUserClient::lockCommon(uint32_t sid, uint32_t options, user_addr_t seedOut)
 +{
 +	struct minisurf_client_ref * ref;
 +	uint32_t seed = 0;
@@ -12939,13 +12939,13 @@ new file mode 100644
 +}
 +
 +IOReturn
-+IOSurfaceRootUserClient::trapLock(void * p1, void * p2, void * p3, void * p4, void * p5, void * p6)
++DipperSurfaceRootUserClient::trapLock(void * p1, void * p2, void * p3, void * p4, void * p5, void * p6)
 +{
 +	return lockCommon((uint32_t) (uintptr_t) p1, (uint32_t) (uintptr_t) p2, (user_addr_t) (uintptr_t) p3);
 +}
 +
 +IOReturn
-+IOSurfaceRootUserClient::trapUnlock(void * p1, void * p2, void * p3, void * p4, void * p5, void * p6)
++DipperSurfaceRootUserClient::trapUnlock(void * p1, void * p2, void * p3, void * p4, void * p5, void * p6)
 +{
 +	return lockCommon((uint32_t) (uintptr_t) p1, (uint32_t) (uintptr_t) p2, (user_addr_t) (uintptr_t) p3);
 +}
@@ -12955,7 +12955,7 @@ new file mode 100644
 + * "release" after it. A lookup of the same surface in between must make a fresh view.
 + */
 +IOReturn
-+IOSurfaceRootUserClient::trapDetach(void * p1, void * p2, void * p3, void * p4, void * p5, void * p6)
++DipperSurfaceRootUserClient::trapDetach(void * p1, void * p2, void * p3, void * p4, void * p5, void * p6)
 +{
 +	struct minisurf_client_ref * ref;
 +
@@ -12969,7 +12969,7 @@ new file mode 100644
 +}
 +
 +IOReturn
-+IOSurfaceRootUserClient::trapRelease(void * p1, void * p2, void * p3, void * p4, void * p5, void * p6)
++DipperSurfaceRootUserClient::trapRelease(void * p1, void * p2, void * p3, void * p4, void * p5, void * p6)
 +{
 +	struct minisurf_client_ref * ref;
 +	uint32_t sid = (uint32_t) (uintptr_t) p1;
@@ -13216,7 +13216,7 @@ new file mode 100644
 @@ -0,0 +1,2904 @@
 +/*
 + * MiniIOMobileFramebuffer: a stand-in for Apple's display driver family, as seen by
-+ * IOMobileFramebuffer.framework (and through it by CoreAnimation's window server).
++ * DipperMobileFramebuffer.framework (and through it by CoreAnimation's window server).
 + *
 + * The display is the framebuffer the boot loader left us (the one the kernel's text console
 + * draws on). There is no hardware behind it that we drive: a "swap" copies the pixels of the
@@ -13415,7 +13415,7 @@ new file mode 100644
 +/*
 + * fb_swapwait=1 (EXP-0134): SwapWait (selector 6, which the window server calls for every swap it made) returns once the
 + * DPU has taken that swap's frame (or a later one), at most 40 ms on, instead of at once: what a native framebuffer is
-+ * thought to do [待验证]. 0: at once.
++ * thought to do [寰呴獙璇乚. 0: at once.
 + */
 +static TUNABLE(uint32_t, gSwapWait, "fb_swapwait", 0);
 +/*
@@ -13685,9 +13685,9 @@ new file mode 100644
 +
 +struct RowJob;
 +
-+class IOMobileFramebuffer : public IOService
++class DipperMobileFramebuffer : public IOService
 +{
-+	OSDeclareDefaultStructors(IOMobileFramebuffer);
++	OSDeclareDefaultStructors(DipperMobileFramebuffer);
 +
 +public:
 +	IOLock *        fLock;
@@ -13805,7 +13805,7 @@ new file mode 100644
 +	void record(MiniIOSurface * s);
 +};
 +
-+OSDefineMetaClassAndStructors(IOMobileFramebuffer, IOService);
++OSDefineMetaClassAndStructors(DipperMobileFramebuffer, IOService);
 +
 +static void
 +setNumber(OSDictionary * dict, const char * key, uint64_t value)
@@ -13828,7 +13828,7 @@ new file mode 100644
 +#define kFBColorID      1
 +
 +void
-+IOMobileFramebuffer::publishModes(void)
++DipperMobileFramebuffer::publishModes(void)
 +{
 +	OSDictionary * timing = OSDictionary::withCapacity(8);
 +	OSDictionary * horizontal = OSDictionary::withCapacity(4);
@@ -14156,7 +14156,7 @@ new file mode 100644
 +
 +/* The DPU as EXP-0128 found it: HW_VERSION 0x40000001, SSPP0 reading the panel's size from the boot framebuffer. */
 +void
-+IOMobileFramebuffer::flipSetup()
++DipperMobileFramebuffer::flipSetup()
 +{
 +	vm_offset_t mdss = ml_io_map(0x0ae00000ull, 0x10000);
 +	volatile uint32_t * top = (volatile uint32_t *) mdss;
@@ -14294,7 +14294,7 @@ new file mode 100644
 +
 +/* The frame in fBase is finished: show it. The buffer before has been latched by now unless frames come faster than the panel. */
 +void
-+IOMobileFramebuffer::flipPresent()
++DipperMobileFramebuffer::flipPresent()
 +{
 +	int index = (fFlipShown + 1) % 3;
 +	uint64_t t0 = mach_absolute_time(), waited, ns;
@@ -14401,7 +14401,7 @@ new file mode 100644
 + * frame before for one refresh, which only delays its report by that.
 + */
 +bool
-+IOMobileFramebuffer::shownSwap(uint32_t * id)
++DipperMobileFramebuffer::shownSwap(uint32_t * id)
 +{
 +	if (!fFlipOn || gMailbox == 0) {
 +		return false;
@@ -14415,7 +14415,7 @@ new file mode 100644
 +}
 +
 +bool
-+IOMobileFramebuffer::start(IOService * provider)
++DipperMobileFramebuffer::start(IOService * provider)
 +{
 +	thread_t thread;
 +
@@ -14430,7 +14430,7 @@ new file mode 100644
 +	fLock = IOLockAlloc();
 +	gDamageLock = IOLockAlloc();
 +	fSwapLock = IOLockAlloc();
-+	if (kernel_thread_start(&IOMobileFramebuffer::presenterMain, this, &thread) != KERN_SUCCESS) {
++	if (kernel_thread_start(&DipperMobileFramebuffer::presenterMain, this, &thread) != KERN_SUCCESS) {
 +		IOLog("MiniIOMobileFramebuffer: no thread to put frames on the panel with\n");
 +		return false;
 +	}
@@ -14439,7 +14439,7 @@ new file mode 100644
 +	fThreads = gThreads >= 1 && gThreads <= 8 ? gThreads : 1;
 +	fHelperLock = IOLockAlloc();
 +	for (unsigned i = 0; i + 1 < fThreads; i++) {
-+		if (kernel_thread_start(&IOMobileFramebuffer::helperMain, this, &thread) != KERN_SUCCESS) {
++		if (kernel_thread_start(&DipperMobileFramebuffer::helperMain, this, &thread) != KERN_SUCCESS) {
 +			fThreads = i + 1;
 +			break;
 +		}
@@ -14506,7 +14506,7 @@ new file mode 100644
 +		}
 +	}
 +
-+	setProperty(kIOUserClientClassKey, "IOMobileFramebufferUserClient");
++	setProperty(kIOUserClientClassKey, "DipperMobileFramebufferUserClient");
 +	/* for who draws with the GPU (userland/src/eagl.c): a frame need not be waited for before it is handed over */
 +	setProperty("RedwoodWaitsForGPU", kOSBooleanTrue);
 +	publishModes();
@@ -14517,7 +14517,7 @@ new file mode 100644
 +
 +/* Keep a small copy of the frame that is about to be shown (the surface is the whole screen). */
 +void
-+IOMobileFramebuffer::record(MiniIOSurface * s)
++DipperMobileFramebuffer::record(MiniIOSurface * s)
 +{
 +	struct rec_header * header = (struct rec_header *) fRecBase;
 +	uint64_t now = mach_absolute_time(), since_first, since_start = 0, frame_size;
@@ -14584,7 +14584,7 @@ new file mode 100644
 +}
 +
 +MiniIOSurface *
-+IOMobileFramebuffer::defaultSurface(void)
++DipperMobileFramebuffer::defaultSurface(void)
 +{
 +	IOLockLock(fLock);
 +	if (fDefaultSurface == NULL) {
@@ -14656,7 +14656,7 @@ new file mode 100644
 +}
 +
 +void
-+IOMobileFramebuffer::drawRows(const RowJob * job, int32_t y0, int32_t y1, uint32_t * blendRow)
++DipperMobileFramebuffer::drawRows(const RowJob * job, int32_t y0, int32_t y1, uint32_t * blendRow)
 +{
 +	const uint8_t * pixels = job->pixels;
 +	uint32_t stride = job->stride;
@@ -14826,9 +14826,9 @@ new file mode 100644
 +
 +/* A helper of the scaling (fb_threads): waits for rows to do, does them, says so. */
 +void
-+IOMobileFramebuffer::helperMain(void * self, wait_result_t result __unused)
++DipperMobileFramebuffer::helperMain(void * self, wait_result_t result __unused)
 +{
-+	IOMobileFramebuffer * fb = (IOMobileFramebuffer *) self;
++	DipperMobileFramebuffer * fb = (DipperMobileFramebuffer *) self;
 +	unsigned index;
 +	uint64_t done = 0;
 +
@@ -14865,7 +14865,7 @@ new file mode 100644
 +
 +/* A frame the GPU has scaled to the panel's size: only copied, by all the threads (no reading in two rows, no blending). */
 +void
-+IOMobileFramebuffer::copyScan(MiniIOSurface * s)
++DipperMobileFramebuffer::copyScan(MiniIOSurface * s)
 +{
 +	RowJob job;
 +
@@ -14901,7 +14901,7 @@ new file mode 100644
 + * step, bilinear (or nearest neighbour: fb_filter=0).
 + */
 +void
-+IOMobileFramebuffer::drawLayer(MiniIOSurface * s, const int32_t * src, const int32_t * dst)
++DipperMobileFramebuffer::drawLayer(MiniIOSurface * s, const int32_t * src, const int32_t * dst)
 +{
 +	int32_t sx = src[0], sy = src[1], sw = src[2], sh = src[3];
 +	int32_t dx = dst[0], dy = dst[1], dw = dst[2], dh = dst[3];
@@ -15060,7 +15060,7 @@ new file mode 100644
 + * stayed under. With the lock held.
 + */
 +void
-+IOMobileFramebuffer::reportFrameTimes(void)
++DipperMobileFramebuffer::reportFrameTimes(void)
 +{
 +	static const uint32_t limits[] = { 10, 18, 26, 35, FRAME_TIMES + 1 };
 +	uint32_t within[sizeof(limits) / sizeof(limits[0])] = { 0 }, total = 0, sum = 0, half = 0, most = 0;
@@ -15094,7 +15094,7 @@ new file mode 100644
 +
 +/* SwapEnd: the swap is handed to the thread that puts frames on the panel, as soon as that has no other waiting. */
 +void
-+IOMobileFramebuffer::present(const uint8_t * swap)
++DipperMobileFramebuffer::present(const uint8_t * swap)
 +{
 +	AbsoluteTime deadline;
 +
@@ -15145,14 +15145,14 @@ new file mode 100644
 +}
 +
 +void
-+IOMobileFramebuffer::presenterMain(void * self, wait_result_t result __unused)
++DipperMobileFramebuffer::presenterMain(void * self, wait_result_t result __unused)
 +{
 +	bindToCpu(3);
-+	((IOMobileFramebuffer *) self)->presenter();
++	((DipperMobileFramebuffer *) self)->presenter();
 +}
 +
 +void
-+IOMobileFramebuffer::presenter(void)
++DipperMobileFramebuffer::presenter(void)
 +{
 +	static uint8_t swap[SWAP_SIZE];         /* (one thread) */
 +	MiniIOSurface * surfaces[SWAP_LAYERS];
@@ -15177,7 +15177,7 @@ new file mode 100644
 +
 +/* Both shown and rejected swaps must release their queue slot exactly once. */
 +void
-+IOMobileFramebuffer::consumeSwap(void)
++DipperMobileFramebuffer::consumeSwap(void)
 +{
 +	IOLockLock(fSwapLock);
 +	fSwapFirst = (fSwapFirst + 1) % SWAP_QUEUE;
@@ -15188,7 +15188,7 @@ new file mode 100644
 +
 +/* A swap's surfaces onto the panel, once the GPU is done with them. */
 +void
-+IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
++DipperMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 +{
 +	uint32_t set = swapWord(swap, SWAP_LAYERS_SET);
 +	uint64_t began = mach_absolute_time(), nanos, ready, shown, drawn;
@@ -15489,12 +15489,12 @@ new file mode 100644
 +
 +/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 +
-+class IOMobileFramebufferUserClient : public IOUserClient
++class DipperMobileFramebufferUserClient : public IOUserClient
 +{
-+	OSDeclareDefaultStructors(IOMobileFramebufferUserClient);
++	OSDeclareDefaultStructors(DipperMobileFramebufferUserClient);
 +
 +	task_t                  fTask;
-+	IOMobileFramebuffer *   fOwner;
++	DipperMobileFramebuffer *   fOwner;
 +	IOLock *                fLock;
 +	mach_port_t             fPorts[kFBNotifyTypes];
 +	mach_vm_address_t       fCallbacks[kFBNotifyTypes];
@@ -15524,10 +15524,10 @@ new file mode 100644
 +	    IOExternalMethodDispatch * dispatch, OSObject * target, void * reference) APPLE_KEXT_OVERRIDE;
 +};
 +
-+OSDefineMetaClassAndStructors(IOMobileFramebufferUserClient, IOUserClient);
++OSDefineMetaClassAndStructors(DipperMobileFramebufferUserClient, IOUserClient);
 +
 +bool
-+IOMobileFramebufferUserClient::initWithTask(task_t owningTask, void * securityID, UInt32 type, OSDictionary * properties)
++DipperMobileFramebufferUserClient::initWithTask(task_t owningTask, void * securityID, UInt32 type, OSDictionary * properties)
 +{
 +	if (!IOUserClient::initWithTask(owningTask, securityID, type, properties)) {
 +		return false;
@@ -15537,19 +15537,19 @@ new file mode 100644
 +}
 +
 +bool
-+IOMobileFramebufferUserClient::start(IOService * provider)
++DipperMobileFramebufferUserClient::start(IOService * provider)
 +{
-+	fOwner = OSDynamicCast(IOMobileFramebuffer, provider);
++	fOwner = OSDynamicCast(DipperMobileFramebuffer, provider);
 +	if (fOwner == NULL || !IOUserClient::start(provider)) {
 +		return false;
 +	}
 +	fLock = IOLockAlloc();
-+	fVSyncCall = thread_call_allocate(&IOMobileFramebufferUserClient::vsyncFired, this);
++	fVSyncCall = thread_call_allocate(&DipperMobileFramebufferUserClient::vsyncFired, this);
 +	return fLock != NULL && fVSyncCall != NULL;
 +}
 +
 +IOReturn
-+IOMobileFramebufferUserClient::clientClose(void)
++DipperMobileFramebufferUserClient::clientClose(void)
 +{
 +	if (fLock != NULL) {
 +		IOLockLock(fLock);
@@ -15566,7 +15566,7 @@ new file mode 100644
 +}
 +
 +void
-+IOMobileFramebufferUserClient::free(void)
++DipperMobileFramebufferUserClient::free(void)
 +{
 +	if (fVSyncCall != NULL) {
 +		thread_call_cancel_wait(fVSyncCall);
@@ -15587,7 +15587,7 @@ new file mode 100644
 +}
 +
 +IOReturn
-+IOMobileFramebufferUserClient::registerNotificationPort(mach_port_t port, UInt32 type, io_user_reference_t refCon)
++DipperMobileFramebufferUserClient::registerNotificationPort(mach_port_t port, UInt32 type, io_user_reference_t refCon)
 +{
 +	mach_port_t old;
 +
@@ -15606,14 +15606,14 @@ new file mode 100644
 +}
 +
 +void
-+IOMobileFramebufferUserClient::vsyncFired(thread_call_param_t self, thread_call_param_t unused)
++DipperMobileFramebufferUserClient::vsyncFired(thread_call_param_t self, thread_call_param_t unused)
 +{
-+	((IOMobileFramebufferUserClient *) self)->vsync();
++	((DipperMobileFramebufferUserClient *) self)->vsync();
 +}
 +
 +/* With the lock held. */
 +void
-+IOMobileFramebufferUserClient::armVSync(void)
++DipperMobileFramebufferUserClient::armVSync(void)
 +{
 +	uint64_t period, now = mach_absolute_time();
 +
@@ -15642,7 +15642,7 @@ new file mode 100644
 +
 +/* With the lock held: the timer has a client for its ticks -- vsync notifications, or frame info with a key asked for. */
 +bool
-+IOMobileFramebufferUserClient::wantsTicks(void) const
++DipperMobileFramebufferUserClient::wantsTicks(void) const
 +{
 +	if (fClosed) {
 +		return false;
@@ -15655,11 +15655,11 @@ new file mode 100644
 + * One refresh. Vsync: the client gets three 64-bit numbers as six 32-bit halves -- the time of this
 + * refresh, the same again (the time it was presented), and a counter. Frame info, when a frame the
 + * client has not been told of is on the panel: [the mask of the values, top bit = each value is two
-+ * 32-bit halves; the swap ID; Presentation_time low, high] (IOMobileFramebuffer's FrameInfoNotifyFunc,
++ * 32-bit halves; the swap ID; Presentation_time low, high] (DipperMobileFramebuffer's FrameInfoNotifyFunc,
 + * EXP-0153) -- the time is the tearing-effect pulse the DPU took it at, the latest before now.
 + */
 +void
-+IOMobileFramebufferUserClient::vsync(void)
++DipperMobileFramebufferUserClient::vsync(void)
 +{
 +	OSAsyncReference64 ref, infoRef;
 +	io_user_reference_t args[6], info[4];
@@ -15711,7 +15711,7 @@ new file mode 100644
 +}
 +
 +IOReturn
-+IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments * args,
++DipperMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments * args,
 +    IOExternalMethodDispatch * dispatch, OSObject * target, void * reference)
 +{
 +	const uint64_t * in = args->scalarInput;
@@ -15801,7 +15801,7 @@ new file mode 100644
 +
 +			/* taken: its frame (or a later one, which took the place of a frame not yet taken) latched by the DPU */
 +			for (int i = 0; i < 40; i++) {
-+				IOMobileFramebuffer * o = fOwner;
++				DipperMobileFramebuffer * o = fOwner;
 +
 +				if ((int32_t) (o->fSwapLatched - id) >= 0 ||
 +				    ((int32_t) (o->fSwapPending - id) >= 0 && (o->fDpuCtl[0x18 / 4] & 1) == 0)) {
@@ -15906,7 +15906,7 @@ new file mode 100644
 +/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 +
 +/*
-+ * IOMobileFramebuffer.framework counts the displays it should wait for by looking for
++ * DipperMobileFramebuffer.framework counts the displays it should wait for by looking for
 + * children of /arm-io in the device tree whose device_type is "display-subsystem".
 + */
 +static void
@@ -16104,7 +16104,7 @@ new file mode 100644
 +void
 +MiniIOMobileFramebufferStart(IOService * provider)
 +{
-+	IOMobileFramebuffer * fb = OSTypeAlloc(IOMobileFramebuffer);
++	DipperMobileFramebuffer * fb = OSTypeAlloc(DipperMobileFramebuffer);
 +
 +	if (fb == NULL || !fb->init() || !fb->attach(provider)) {
 +		OSSafeReleaseNULL(fb);
