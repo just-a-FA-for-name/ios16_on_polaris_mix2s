@@ -1,5 +1,13 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## CURRENT 2026-11-06: Dipper A630 integrated, CI pending, no hardware claim
+
+- Reference https://github.com/youzjuzi/dipper-xnu at 4e82c709 is highly relevant: same SDM845 with verified A630 rendering and Wi-Fi/Safari. Our performance gap is not the CPU; Dipper has a real GPU path while Polaris still relies heavily on CPU rendering. Existing ~5.2GiB RAM and 60Hz scheduling remain intact; ~11ms panel copy does not explain ~2s interactions.
+- New 0102-polaris-dipper-a630.patch (684612B) imports mi8_adreno.c, A630 init data, RedwoodGPU, MiniIOSurface/MiniIOMobileFramebuffer, redwood_adreno wrappers and redwood_input.h, plus polaris_dipper_compat.c using four ADT firmware blobs. bsd/conf/files, iokit/conf/files.arm64 and sweet_ufs init are wired with a Polaris board guard. 0101-baseline apply check passed; commit 361298648d7d878538fc2c060547f8b2c1f53a93.
+- CI 42196361729 is currently building. NO new kernel, A630 selftest, speed improvement, wallpaper fix or Wi-Fi result exists. Existing Sweet display stays for the first selftest; Mini/Mesa display integration is the next stage, not a completed feature.
+- Next: download/check CI; extract four firmware files read-only and validate sizes; package extended-memory ADT with GPU-SQE/GMU/ZAP-MDT/ZAP-B02 and gpu=1 mi8gpu_selftest=1. Only after selftest integrate Mini/Mesa/freedreno userland and measure real UI. Then reuse Dipper MSS/GLINK/WLFW/ath10k for Wi-Fi. Full handoff is at ../给下一个AI的交接.md. Phone remains TWRP, no partition writes.
+
+
 ## START HERE — 2026-11-06 00:55 final results saved before scheduled01:00 shutdown
 
 Final source commit01ebeecabf1c4c44b076c3749249093abfe60910 fixes the omitted version gate: ONLY actual verified integer VersionNumber7 accepted. Regression first failed for7 unsupported/type-confused values, then passed. ALL104 local tests pass; final CI42069117565 SUCCESS with104 macOS tests, standalone50000-trial ASan+UBSan H4 fuzz, and iOS arm64 compile/link/sign. Previous full103 suite ran under UBSan too; new104th test is Python-only. Repository validation101 patches/48 Python/7 shell passed after final edit.
