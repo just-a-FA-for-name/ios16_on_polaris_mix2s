@@ -5240,7 +5240,56 @@ diff --git a/bsd/dev/redwood_adreno.c b/bsd/dev/redwood_adreno.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/redwood_adreno.c
-@@ -0,0 +1,4181 @@
+@@ -0,0 +1,4232 @@
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++/* Polaris uses the Dipper A630 backend exclusively. The other backend below
++ * expects the HackiOS APFS image/return-to-UEFI ABI, absent from this shim.
++ * Preserve that implementation for other boards; never substitute its MMIO
++ * path when the A630 backend is not running.
++ */
++#include <sys/types.h>
++#include <sys/systm.h>
++#include <sys/redwood_input.h>
++uint32_t gpu_log;
++uint32_t gpu_va;
++bool redwood_gpu_ready(void) { return mi8_gpu_kept(); }
++bool redwood_gpu_parameter(uint32_t which, uint64_t *value) {
++    return mi8_gpu_kept() && mi8_gpu_parameter(which, value);
++}
++uint64_t redwood_gpu_address(uint64_t size) {
++    return mi8_gpu_kept() ? mi8_gpu_address(size) : 0;
++}
++void redwood_gpu_address_free(uint64_t address, uint64_t size) {
++    if (mi8_gpu_kept()) mi8_gpu_address_free(address, size);
++}
++void redwood_gpu_space(uint64_t *used, uint32_t *live, uint64_t *largest,
++    unsigned *holes, unsigned *most, uint64_t *lost, uint32_t *refused) {
++    if (mi8_gpu_kept()) { mi8_gpu_space(used, live, largest, holes, most, lost, refused); return; }
++    *used = *largest = *lost = 0; *live = *holes = *most = *refused = 0;
++}
++bool redwood_gpu_map(uint64_t address, uint64_t phys, bool read_only) {
++    return mi8_gpu_kept() && mi8_gpu_map(address, phys, read_only);
++}
++void redwood_gpu_mapped(void) { if (mi8_gpu_kept()) mi8_gpu_mapped(); }
++void redwood_gpu_unmap(uint64_t address, uint64_t size) {
++    if (mi8_gpu_kept()) mi8_gpu_unmap(address, size);
++}
++void redwood_gpu_to_memory(void *start, uint64_t size) {
++    if (mi8_gpu_kept()) mi8_gpu_to_memory(start, size);
++}
++uint32_t redwood_gpu_submit(const uint64_t *addresses, const uint32_t *words, uint32_t count) {
++    return mi8_gpu_kept() ? mi8_gpu_submit(addresses, words, count) : 0;
++}
++bool redwood_gpu_done(uint32_t fence) { return mi8_gpu_kept() && mi8_gpu_done(fence); }
++uint32_t redwood_gpu_last(void) { return mi8_gpu_kept() ? mi8_gpu_last() : 0; }
++void redwood_gpu_worked(uint64_t *microseconds, uint32_t *submissions, uint32_t by[7]) {
++    if (mi8_gpu_kept()) { mi8_gpu_worked(microseconds, submissions, by); return; }
++    *microseconds = 0; *submissions = 0; bzero(by, 7 * sizeof(*by));
++}
++void redwood_gpu_report(const char *why) { if (mi8_gpu_kept()) mi8_gpu_report(why); }
++bool redwood_gpu_recover(void) { return mi8_gpu_kept() && mi8_gpu_recover(); }
++void redwood_gpu_stop(void) { if (mi8_gpu_kept()) mi8_gpu_stop(); }
++#else
 +/*
 + * The GPU of the POCO X5 Pro (redwood), an Adreno 642L, woken step by step up to a picture that
 + * it fills and the panel shows. Every address below belongs to this phone, and nothing here is
@@ -9422,6 +9471,8 @@ new file mode 100644
 +	}
 +	printf("adreno: over; the system goes on starting\n");
 +}
++
++#endif /* Polaris A630-only bridge versus original backend */
 diff --git a/bsd/dev/polaris_dipper_compat.c b/bsd/dev/polaris_dipper_compat.c
 new file mode 100644
 --- /dev/null
