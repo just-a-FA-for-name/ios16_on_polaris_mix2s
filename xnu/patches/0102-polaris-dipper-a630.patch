@@ -333,6 +333,49 @@
  		    pt_reset_rd(0), pt_reset_rd(IO_REG));
  		if (!(pt_reset_rd(IO_REG) & 1u)) {
  			printf("POLARIS I2C: RESET99 pad did not rise\n");
+@@ -463,6 +473,7 @@
+ 		bool logged_bad_frame = false;
+ 		unsigned candidates[MAX_FINGERS] = {0};
+ 		int prior_x[MAX_FINGERS] = {0}, prior_y[MAX_FINGERS] = {0};
++		unsigned contact_log = 0, nonzero_frames = 0, frame_no = 0;
+ 		printf("POLARIS HID: experimental F12 base 0x%02x, %u slots, 8 bytes each\n",
+ 		    f12[3], pt_fingers);
+ 		for (;;) {
+@@ -470,6 +481,7 @@
+ 			int x[MAX_FINGERS] = {0}, y[MAX_FINGERS] = {0};
+ 			bool read_ok = pt_read(f12[3], raw, pt_fingers * FINGER_BYTES);
+ 			unsigned bad_slot = MAX_FINGERS;
++			frame_no++;
+ 			if (read_ok) {
+ 				for (unsigned slot = 0; slot < pt_fingers; ++slot) {
+ 					if (!pt_frame(raw + slot * FINGER_BYTES,
+@@ -499,6 +511,26 @@
+ 				continue;
+ 			}
+ 			failures = 0;
++			{
++				unsigned n = 0;
++				for (unsigned slot = 0; slot < pt_fingers; ++slot) {
++					if (present[slot]) {
++						n++;
++					}
++				}
++				if (n) {
++					nonzero_frames++;
++					if (++contact_log <= 12 || (contact_log & 15) == 0) {
++						printf("POLARIS HID: contact f%u n%u s0=%02x %02x %02x %02x %02x %02x %02x %02x xy=%d,%d\n",
++						    frame_no, n, raw[0], raw[1], raw[2], raw[3],
++						    raw[4], raw[5], raw[6], raw[7], x[0], y[0]);
++					}
++				} else if (contact_log) {
++					printf("POLARIS HID: contacts ended after %u nonzero frames\n", nonzero_frames);
++					contact_log = 0;
++					nonzero_frames = 0;
++				}
++			}
+ 			for (unsigned slot = 0; slot < pt_fingers; ++slot) {
+ 				if (!present[slot]) {
+ 					if (pt_down[slot]) {
 diff --git a/bsd/dev/mi8_adreno.c b/bsd/dev/mi8_adreno.c
 new file mode 100644
 --- /dev/null
