@@ -61,7 +61,7 @@ diff --git a/bsd/dev/mi8_adreno.c b/bsd/dev/mi8_adreno.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/mi8_adreno.c
-@@ -0,0 +1,4760 @@
+@@ -0,0 +1,4840 @@
 +/*
 + * The GPU of the Xiaomi Mi 8 (dipper, SDM845): an Adreno 630 (chip id 0x06030001, "qcom,chipid" of the phone's
 + * own device tree), woken step by step. Only with boot-arg mi8gpu=N, which performs steps 1 to N and stops.
@@ -116,6 +116,7 @@ new file mode 100644
 +extern void loader_log_putc(char c);
 +
 +static int say(const char *format, ...) __printflike(1, 2);
++static void polaris_gpu_checkpoint(const char *where);
 +
 +/* to the loader's log at once as well: a step that hangs the machine leaves no other trace */
 +static int
@@ -370,6 +371,40 @@ new file mode 100644
 +	cx_on = cx_wait(true);
 +	printf("mi8gpu: CX GDSCR after: %#010x, hardware control %#010x: the switch is %s\n", rd(gpucc + GPUCC_CX_GDSCR),
 +	    rd(gpucc + GPUCC_CX_GDSC_HWCTRL), cx_on ? "ON" : "STILL OFF (2 ms)");
++	return cx_on;
++}
++
++/*
++ * mi8gpu_cxhold=1: before register access that follows a pause, make sure the CX
++ * domain is still on. An enabled PDC or an RPMh sleep sequence may collapse the
++ * domain while the CPU sleeps; the first MMIO afterwards then hangs the register
++ * bus and leaves no log at all. GPUCC itself is not in the CX domain (its CX
++ * GDSCR is read while the domain is off in stale_stop), so this check is safe.
++ * Re-asserting is only software-forced-on, exactly what step 4 did.
++ */
++static int cxhold = -1;
++static bool
++cx_ensure(const char *where)
++{
++	uint32_t v;
++
++	if (cxhold < 0) {
++		int n = 0;
++		cxhold = (PE_parse_boot_argn("mi8gpu_cxhold", &n, sizeof(n)) && n == 1) ? 1 : 0;
++	}
++	if (!cxhold || !cx_on || gpucc == 0) {
++		return true;
++	}
++	v = rd(gpucc + GPUCC_CX_GDSC_HWCTRL);
++	if (v & GDSC_PWR_ON) {
++		return true;
++	}
++	printf("mi8gpu: CX domain lost before %s (hwctrl %#010x); re-asserting\n", where, v);
++	v = rd(gpucc + GPUCC_CX_GDSCR);
++	wr(gpucc + GPUCC_CX_GDSCR, v & ~GDSCR_SW_COLLAPSE);
++	cx_on = cx_wait(true);
++	printf("mi8gpu: CX re-assert %s: GDSCR %#010x hwctrl %#010x\n", cx_on ? "back ON" : "STILL OFF (2 ms)",
++	    rd(gpucc + GPUCC_CX_GDSCR), rd(gpucc + GPUCC_CX_GDSC_HWCTRL));
 +	return cx_on;
 +}
 +
@@ -837,19 +872,29 @@ new file mode 100644
 +	}
 +	for (uint32_t i = 0; i < RS_COUNT; i++) {
 +		struct rs_write *w = &rs_writes[i];
-+		uint32_t back;
++		uint32_t back, value = w->value;
++		bool overridden = false;
 +
-+		wr(rs_address(w), w->value);
++		if (w->region == RS_PDC && w->word == 0x1140) {
++			int pdcen = 0;
++			if (PE_parse_boot_argn("mi8gpu_pdcen", &pdcen, sizeof(pdcen))) {
++				value = (uint32_t)pdcen;
++				overridden = true;
++			}
++		}
++		wr(rs_address(w), value);
 +		rs_written = i + 1;
 +		back = rd(rs_address(w));
-+		bool same = ((back ^ w->value) & rs_mask(w)) == 0;
++		bool same = ((back ^ value) & rs_mask(w)) == 0;
 +
-+		if (!same) {
++		if (!same && !overridden) {
 +			different++;
 +		}
-+		printf("mi8gpu:   %-40s was %#010x, wrote %#010x, read back %#010x%s\n", w->name, w->old, w->value, back,
-+		    same ? (back == w->value ? "" : "  (bits the hardware keeps fixed)") : "  DIFFERENT");
++		printf("mi8gpu:   %-40s was %#010x, wrote %#010x, read back %#010x%s%s\n", w->name, w->old, value, back,
++		    same ? (back == value ? "" : "  (bits the hardware keeps fixed)") : "  DIFFERENT",
++		    overridden ? "  (mi8gpu_pdcen, not counted)" : "");
 +	}
++	polaris_gpu_checkpoint("pdc: post-enable settle");
 +	printf("mi8gpu: RSC after: RSC_STATUS0_DRV0 %#010x, SEQ_BUSY_DRV0 %#010x\n", rd(rs_region[RS_RSCC] + 4 * 0x4),
 +	    rd(rs_region[RS_RSCC] + 4 * 0x101));
 +	return different == 0;
@@ -1394,12 +1439,23 @@ new file mode 100644
 +	return g3d_ready;
 +}
 +
++/* mi8gpu_s12=N: stop inside step 12 before more hardware is touched. 0 (default)
++ * runs all of it; 1 stops after the idle check, 2 after the tables are built,
++ * 3 after the context bank and stream are programmed, 4 after the ATOS checks;
++ * any nonzero limit also skips the 3D core's address space. */
++static uint32_t
++s12_limit(void)
++{
++	int n = 0;
++	return (PE_parse_boot_argn("mi8gpu_s12", &n, sizeof(n)) && n > 0) ? (uint32_t)n : 0;
++}
++
 +static bool
 +step_gmu_smmu(void)
 +{
 +	uint64_t *l1, *l2, *l3, root, phys, expected;
 +	vm_offset_t cb;
-+	uint32_t wrong = 0, pages = 0;
++	uint32_t wrong = 0, pages = 0, limit = s12_limit();
 +
 +	if (smmu == 0 || smmu_num_cb <= GMU_CTX || smmu_num_smr <= GMU_SMR_ENTRY) {
 +		printf("mi8gpu: the SMMU was not read (step 7), or has too few context banks\n");
@@ -1410,9 +1466,15 @@ new file mode 100644
 +	if (PE_parse_boot_argn("mi8gpu_smr_probe", &smr_probe, sizeof(smr_probe)) && smr_probe == 1) {
 +		return gmu_smr_probe();
 +	}
++	polaris_gpu_checkpoint("s12: before idle reads");
 +	if (!gmu_smmu_idle()) {
 +		return false;
 +	}
++	if (limit == 1) {
++		printf("mi8gpu: s12=1: idle check passed; stopping before the tables\n");
++		return true;
++	}
++	polaris_gpu_checkpoint("s12: before table alloc");
 +	if (kmem_alloc(kernel_map, &gmu_tables, PAGE_SIZE, KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
 +		printf("mi8gpu: no memory for the tables\n");
 +		return false;
@@ -1451,6 +1513,11 @@ new file mode 100644
 +	}
 +	to_memory(gmu_tables, PAGE_SIZE);
 +	printf("mi8gpu: tables at %#llx (level 1), %u pages mapped\n", root, pages);
++	if (limit == 2) {
++		printf("mi8gpu: s12=2: tables built; stopping before the registers are written\n");
++		return true;
++	}
++	polaris_gpu_checkpoint("s12: before context write");
 +
 +	/* remember what is there, to put it back */
 +	smmu_old.smr = rd(smmu + SMMU_SMR(GMU_SMR_ENTRY));
@@ -1513,6 +1580,11 @@ new file mode 100644
 +		printf("mi8gpu: the SMMU did not take what was written\n");
 +		return false;
 +	}
++	if (limit == 3) {
++		printf("mi8gpu: s12=3: context bank and stream programmed; stopping before ATOS\n");
++		return true;
++	}
++	polaris_gpu_checkpoint("s12: before ATOS");
 +
 +	/* what the SMMU makes of every page of the regions, and of two addresses nothing maps */
 +	for (uint32_t r = 0; r < GMU_REGIONS; r++) {
@@ -1537,10 +1609,17 @@ new file mode 100644
 +		}
 +	}
 +	printf("mi8gpu: context fault status %#010x, global %#010x\n", rd(cb + CB_FSR), rd(smmu + SMMU_SGFSR));
-+	if (wrong == 0) {
-+		uint32_t want3d = 0;
++	if (limit == 4) {
++		printf("mi8gpu: s12=4: ATOS checks done (%u wrong); stopping before the 3D core\n", wrong);
++		return true;
++	}
++	if (wrong == 0 && limit == 0) {
++		uint32_t want3d = 0, nog3d = 0;
 +
-+		if ((PE_parse_boot_argn("mi8gpu_3d", &want3d, sizeof(want3d)) && want3d) || gmu_last_step >= 20) {
++		if (PE_parse_boot_argn("mi8gpu_nog3d", &nog3d, sizeof(nog3d)) && nog3d) {
++			printf("mi8gpu: mi8gpu_nog3d: the 3D core's address space is skipped\n");
++		} else if ((PE_parse_boot_argn("mi8gpu_3d", &want3d, sizeof(want3d)) && want3d) || gmu_last_step >= 20) {
++			polaris_gpu_checkpoint("g3d: before fw lookup");
 +			return g3d_smmu_setup();
 +		}
 +	}
@@ -4303,6 +4382,7 @@ new file mode 100644
 +        if (ms > 3000) ms = 3000;
 +        (void)tsleep(&channel, PZERO, "gpuchk", MAX(1, (int)((ms * hz + 999) / 1000)));
 +    }
++    (void)cx_ensure(where);
 +}
 +
 +static bool
