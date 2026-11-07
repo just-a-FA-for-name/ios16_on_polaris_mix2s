@@ -380,7 +380,7 @@ diff --git a/bsd/dev/mi8_adreno.c b/bsd/dev/mi8_adreno.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/mi8_adreno.c
-@@ -0,0 +1,4924 @@
+@@ -0,0 +1,4939 @@
 +/*
 + * The GPU of the Xiaomi Mi 8 (dipper, SDM845): an Adreno 630 (chip id 0x06030001, "qcom,chipid" of the phone's
 + * own device tree), woken step by step. Only with boot-arg mi8gpu=N, which performs steps 1 to N and stops.
@@ -4902,6 +4902,7 @@ new file mode 100644
 +
 +static vm_offset_t mi8_imem;
 +static bool mi8_cookie_ok;
++extern vm_map_address_t phystokv(uint64_t pa);
 +
 +static uint64_t
 +mi8_fastboot_reset(void)
@@ -4912,7 +4913,7 @@ new file mode 100644
 +	register uint64_t x3 __asm__("x3") = 0;
 +
 +	if (mi8_cookie_ok) {
-+		*(volatile uint32_t *)(mi8_imem + (MI8_IMEM_RESTART_REASON & 0xfffUL)) = MI8_RESTART_BOOTLOADER;
++		*(volatile uint32_t *)mi8_imem = MI8_RESTART_BOOTLOADER;
 +	}
 +	__asm__ volatile ("dsb sy" ::: "memory");
 +	__asm__ volatile ("smc #0" : "+r" (x0), "+r" (x1), "+r" (x2), "+r" (x3) : :
@@ -4939,13 +4940,23 @@ new file mode 100644
 +	uint32_t secs = (uint32_t)(uintptr_t)parameter;
 +	uint64_t rc;
 +
-+	mi8_imem = ml_io_map(MI8_IMEM_RESTART_REASON & ~0xfffUL, 0x1000);
-+	mi8_cookie_ok = mi8_imem != 0;
++	printf("mi8gpu: rb alive secs=%u\n", secs);
++	/* phystokv is the physmap translation: no VM allocation, cannot block. Verify
++	 * the round trip with kvtophys before trusting it; fall back to ml_io_map. */
++	mi8_imem = phystokv(MI8_IMEM_RESTART_REASON);
++	mi8_cookie_ok = mi8_imem && kvtophys(mi8_imem) == MI8_IMEM_RESTART_REASON;
++	printf("mi8gpu: rb cookie va=%#lx roundtrip=%u\n", mi8_imem, mi8_cookie_ok);
++	if (!mi8_cookie_ok) {
++		vm_offset_t page = ml_io_map(MI8_IMEM_RESTART_REASON & ~0xfffUL, 0x1000);
++		printf("mi8gpu: rb imem ml_io_map page=%#lx\n", page);
++		mi8_imem = page ? page + (MI8_IMEM_RESTART_REASON & 0xfffUL) : 0;
++		mi8_cookie_ok = mi8_imem != 0;
++	}
 +	if (mi8_cookie_ok) {
-+		*(volatile uint32_t *)(mi8_imem + (MI8_IMEM_RESTART_REASON & 0xfffUL)) = MI8_RESTART_BOOTLOADER;
++		*(volatile uint32_t *)mi8_imem = MI8_RESTART_BOOTLOADER;
 +	}
 +	PE_halt_restart = mi8_halt_restart;
-+	printf("mi8gpu: reboot arm: %u s then reset to fastboot (imem %#lx, halt_restart armed)\n",
++	printf("mi8gpu: reboot arm: %u s then reset to fastboot (cookie va %#lx, halt_restart armed)\n",
 +	    secs, mi8_imem);
 +	for (uint32_t i = 0; i < secs; i++) {
 +		sleep_us(1000000);
@@ -4971,9 +4982,13 @@ new file mode 100644
 +		uint32_t rb = 0;
 +		thread_t rb_thread;
 +
-+		if (PE_parse_boot_argn("mi8gpu_rbsec", &rb, sizeof(rb)) && rb &&
-+		    kernel_thread_start(mi8_rb_thread, (void *)(uintptr_t)rb, &rb_thread) == KERN_SUCCESS) {
-+			thread_deallocate(rb_thread);
++		if (PE_parse_boot_argn("mi8gpu_rbsec", &rb, sizeof(rb)) && rb) {
++			printf("mi8gpu: rbsec=%u parsed; starting reset thread\n", rb);
++			kern_return_t kr = kernel_thread_start(mi8_rb_thread, (void *)(uintptr_t)rb, &rb_thread);
++			printf("mi8gpu: rb thread start rc=%d\n", kr);
++			if (kr == KERN_SUCCESS) {
++				thread_deallocate(rb_thread);
++			}
 +		}
 +	}
 +
