@@ -10046,7 +10046,7 @@ diff --git a/bsd/dev/polaris_dipper_compat.c b/bsd/dev/polaris_dipper_compat.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/polaris_dipper_compat.c
-@@ -0,0 +1,94 @@
+@@ -0,0 +1,111 @@
 +/* Small Polaris adapters for the Dipper A630 path; no APFS/UEFI dependency. */
 +#if defined(ARM64_BOARD_CONFIG_SWEET)
 +#include <sys/param.h>
@@ -10054,6 +10054,8 @@ new file mode 100644
 +#include <machine/machine_routines.h>
 +#include <pexpert/device_tree.h>
 +#include <libkern/libkern.h>
++#include <mach/vm_param.h>
++#include <vm/vm_kern.h>
 +
 +extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
 +
@@ -10103,11 +10105,26 @@ new file mode 100644
 +			return NULL;
 +		}
 +		vm_offset_t va = ml_io_map((vm_offset_t)pa, (vm_size_t)bytes);
++		vm_offset_t copy = 0;
++
 +		if (!va) {
 +			return NULL;
 +		}
++		/* The mapping is device memory: memcpy() of it faults (unaligned/vector reads are not
++		 * supported there -- EXP polaris: "Unaligned kernel data abort" inside memcpy at
++		 * fw+4). Hand out a normal copy instead; single word reads work on either side. */
++		if (kmem_alloc(kernel_map, &copy, round_page(bytes), KMA_KOBJECT | KMA_ZERO | KMA_DATA,
++		    VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
++			return NULL;
++		}
++		for (uint64_t i = 0; i < bytes / 4; i++) {
++			((uint32_t *)copy)[i] = ((const uint32_t *)va)[i];
++		}
++		for (uint64_t i = bytes & ~3ull; i < bytes; i++) {
++			((uint8_t *)copy)[i] = ((const uint8_t *)va)[i];
++		}
 +		*size = bytes;
-+		return (const uint8_t *)va;
++		return (const uint8_t *)copy;
 +	}
 +	return NULL;
 +}
