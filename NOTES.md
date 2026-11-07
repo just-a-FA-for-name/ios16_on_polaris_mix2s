@@ -1,4 +1,14 @@
-﻿## CURRENT 2026-11-07 ~20:30 REAL HANG FOUND: g3d_smmu_setup at step12-tail (steps 13-19 all PASS)
+﻿## CURRENT 2026-11-07 ~21:55 ROOT CAUSE CONFIRMED BY PANIC PHOTO: memcpy of io-mapped firmware
+### The actual bug (user-photographed panic screen, kernel H `0d4e79b7`)
+- Panic: `panic(cpu 2 caller ...): Unaligned kernel data abort`, PC inside **`_memcpy`** (symbolized via mach-o symtab: `_memcpy` file-VMA `0xfffffe00079ac4b0` matches the panic PC tail `079ac4b0`), FAR = an iomap VA `0xffffffe0ffe5xxxx` ending in `...004`.
+- Last console line before the dump: `mi8gpu: a630_sqe.fw: 32136 bytes` — the crash is `g3d_smmu_setup()`'s `memcpy(dst, fw + 4, 32132)`: `redwood_wifi_file()` returns **`ml_io_map` DEVICE memory**, and bulk/vector reads on device memory fault (only aligned single-register accesses allowed). The `a630_gmu.bin` path survived because it copies word-by-word.
+- **This also explains the "silent freeze":** kernel panic = whole machine dead → console ring writer dies before flushing → ring pulls were 100% stale (byte-identical to the previous boot, `flush #50`). Every "hang" since `mi8gpu=20` was this panic; kernel J's two dead boots were the SAME memcpy now reached via `gmu_run()` (the relocation worked, the copy still faulted).
+- Second identical site: `zap_load()` memcpy of `a630_zap.mdt` (would have panicked at step 21).
+- **Fix `86e8f12`:** `redwood_wifi_file()` (`polaris_dipper_compat.c`) now kmem_allocs a normal buffer and fills it with aligned u32 reads — every caller (sqe memcpy, zap mdt memcpy, gmu word loop, first-words prints) is safe by construction. ml_io_map only maps it for the copy.
+- Fix chain so far: `69c86a6` rb via bsd_timeout callout → `9d6cef5` g3d setup after GPU_SET → `86e8f12` io-fw kmem copy. polaris-ci snapshot **K `5f99b3a`** has all three; dev build running → RELEASE → run `mi8gpu=20 rbsec=200` on kernel K.
+- If kernel K still panics in g3d, the `g3d:` checkpoints (entry/fw lookup/idle check/allocs/tables/state/CB written/ATOS done) name the line.
+
+## 2026-11-07 ~20:30 REAL HANG FOUND: g3d_smmu_setup at step12-tail (steps 13-19 all PASS)
 ### What the step ladder proved tonight (kernel G c07ca162 + kernel H 0d4e79b7, all `mi8gpu_cxhold=1`)
 - **steps 1-19 ALL PASS on real hardware.** Verified per-step rings:
   - 13 step_trustzone: SCM queries answered, `PAS_SUPPORTED=0` (zap auth still unverified — step21 does its own query).
