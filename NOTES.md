@@ -1,4 +1,58 @@
-﻿## CURRENT 2026-11-07 step12 bisect build (supersedes stale sections)
+﻿## CURRENT 2026-11-07 ~20:30 REAL HANG FOUND: g3d_smmu_setup at step12-tail (steps 13-19 all PASS)
+### What the step ladder proved tonight (kernel G c07ca162 + kernel H 0d4e79b7, all `mi8gpu_cxhold=1`)
+- **steps 1-19 ALL PASS on real hardware.** Verified per-step rings:
+  - 13 step_trustzone: SCM queries answered, `PAS_SUPPORTED=0` (zap auth still unverified — step21 does its own query).
+  - 14 step_gmu_prepare: `boot preflight configured 15 registers`, M3 held.
+  - 15 step_gmu_start: **`FW_INIT_RESULT 0xbabeface` — the GMU M3 runs a630_gmu.bin on polaris.**
+  - 16 step_gmu_rail: GX votes + rail sequence complete.
+  - 17 step_gmu_hfi: **`HFI_CTRL_STATUS 0x1`, messages 0/1/3/4/5 acked error 0, firmware `0x10070000`** — host↔GMU protocol live.
+  - 18 step_gpu_look: 3D core regs read under GPU_SET.
+  - 19 step_gpu_init: a630 hw_init register writes complete (`step 19: done`).
+- **THE hang** (`boot-067H-s20.txt`): `checkpoint g3d: before fw lookup` is the LAST probe line — `g3d_smmu_setup()` ran at step12's tail when `gmu_last_step>=20`, i.e. BEFORE the GMU was ever started and GX powered. The probe thread died silently (no panic, userspace kept booting). That is exactly why `mi8gpu=12` passed (limit<20 skips g3d) but `mi8gpu=20` froze — the "slow boot" theory was wrong for THIS round.
+- **Fix `9d6cef5`**: the step12-tail call is removed; `g3d_smmu_setup()` now runs inside `gmu_run()` AFTER `OOB_GPU_SET` is acknowledged (GX on, same point a6xx programs the 3D context bank in Linux). 10 `g3d:` checkpoints added inside it so any residual hang names its line (fw lookup / idle-check reads / allocs / table build / CB writes / ATOS).
+- **rb reset rewritten as `bsd_timeout` callout** (`69c86a6`): the dedicated rb thread randomly never ran on kernel G/H (~1/3 of rounds, zero prints even at entry). Callout runs on the timer thread — no scheduler dependence. UNVERIFIED on device yet (kernel J).
+- Snapshots: I `f050dab` (callout reset only, dev build 42370440321 OK), **J `d0e7b3a` (g3d-after-GPU_SET + callout reset + g3d checkpoints) — dev build running, then RELEASE for kernel J.**
+- Next device rounds on kernel J: `mi8gpu=20` (expect g3d checkpoints then CP work), 21 (zap), 22 (paint), then `gpu=1` keep path. rbsec=200 should now auto-return every round.
+
+## 2026-11-07 ~18:15 STEP12 FULLY EXONERATED — bisect moves to steps 13-22 (supersedes stale sections)
+
+### Bisect series results (kernel G `c07ca162` = RELEASE 42358631350, all rounds `mi8gpu_cxhold=1 mi8gpu_rbsec=200`, fully unattended: self-reset->fastboot->TWRP->pull works)
+- **rbsec self-reset CONFIRMED WORKING** with the shim-exact sequence (IMEM cookie + dsb + PSCI, no PON/PSHOLD): every round returns to fastboot ~+200 s after arm, ring pulled automatically. `reboot arm` prints get eaten by console interleaving but the reset fires (timestamps match exactly).
+- **050** `mi8gpu=11`: PASS, ring `boot-050-resetcheck.txt` (269756 B, 451 flushes).
+- **051** `mi8gpu=12 s12=1`: PASS — `SMMU idle check: reset 0x1 GX 0x222001 S2CR 0x200ff CBAR 0`, ring `boot-051-s12-1.txt`.
+- **052** `mi8gpu=12 s12=2`: PASS — `tables at 0x180a7c000 (level 1), 13 pages mapped`, ring `boot-052-s12-2.txt`.
+- **053** `mi8gpu=12 s12=3`: PASS — context bank + streams programmed and put back; restore mismatches on read-only regs are expected; ring `boot-053-s12-3.txt`.
+- **054** `mi8gpu=12 s12=4`: PASS — ATOS translates every GMU page correctly (`0x60000000 -> PAR 0x4000000186630b80`), unmapped addrs fault as designed, GMU fw 8192 words 0 wrong; ring `boot-054-s12-4.txt`.
+- **055** `mi8gpu=12` (full): PASS — `0 of 13 pages translated wrong`, `step 12: done`, userspace reached; ring `boot-055-s12full.txt`. NOTE: 3D-core address space (g3d_smmu_setup) did NOT run — it needs `mi8gpu_3d=1` or `mi8gpu>=20`.
+- **Conclusion: NOTHING inside step12 hangs.** The earlier "mi8gpu=12 hangs" reports were a different failure mode (slow boot + premature rbsec reset loop), not an SMMU bus hang. CX domain, SMMU global+context, stream matching, page tables, ATOS all work on polaris.
+- **GPU step ladder** (`steps[]` in mi8_adreno.c): 13=step_trustzone (SCM queries), 14=step_gmu_prepare, 15=step_gmu_start (release M3 reset), 16=step_gmu_rail, 17=step_gmu_hfi, 18=step_gpu_look (3D regs), 19=step_gpu_init (a630 hw_init writes), 20=step_gpu_cp (3D SMMU + SQE + ring + CP_ME_INIT), 21=step_gpu_zap (zap + secure off + first command), 22=step_gpu_paint (CP renders into FB).
+- Next: bisect series B — `mi8gpu=13,14,...,22` one level per round (each adds exactly one hardware touch; series auto-stops on first non-return => the hang step). Keep `mi8gpu_cxhold=1 mi8gpu_rbsec=200`.
+
+## 2026-11-07 ~17:20 TOUCH WORKS on-device; rbsec root-cause found (supersedes stale sections)
+
+### Touch: FIXED (user-confirmed on kernel E)
+- boot-047 (`device-private/logs/boot-047-touchE.txt`, kernel E `6955b2ad` = RELEASE 42355451032, snapshot E d1adbb58): `IRQ125 cfg 0x201 -> 0x3` + `RESET99 pulsed+released` = the 67742b4 delay()-busy-wait + shim-proven pulse fix ran. 8 SWEET LAT touch lines = 4 coherent user gestures incl. a 19 s drag and bottom-edge swipes; backboardd open + 1 client; step11 clean; desktop reached; **user confirms touch visibly works**. Root cause of the earlier dead touch was `pt_wait`'s deadline sleep only firing ~1 s during early boot — real poll rate ~1 Hz meant every quick swipe fell between polls; only >1 s contacts ever registered. `delay()` busy-wait makes the loop a true 50 Hz.
+- The 3 gestures seen in boot-046 were the same sparse-sampling artifact, not ghosts.
+- Remaining touch truth check: snapshot G adds `POLARIS HID: contact f%u n%u s0=...` heartbeat (raw slot bytes + decoded coords) for future decode verification — not in kernel E.
+
+### This round's earlier findings (all observed, not guesses)
+- **boot-046 ring** (`device-private/logs/boot-046-kernelD-norb.txt`, kernel D `beaac778`, `mi8gpu=11 cxhold` NO rbsec): kernel D is NOT broken — probe completed all 11 steps, teardown clean, desktop reached (SpringBoard/backboardd AKS traffic, key events, stable vsync). Earlier "kernel D dies" conclusions were wrong: it was just SLOW boot (>7 min; UFS journal replay after dirty shutdowns) + rbsec=180 firing before the ring was ever written.
+- **Reset path ROOT CAUSE**: round 047 (kernel D, rbsec=300) reset fired on schedule (+302 s adb-offline blip) but landed dark, not fastboot. Cause: my SPMI PON writes (commit 053aa6c, copied from flame shim) set PON_PS_HOLD_RESET_CTL=HARD_RESET — on polaris a hard reset CLEARS IMEM, erasing the 0x77665500 restart cookie → ABL boots normally. The polaris shim never touches PON: default warm reset preserves IMEM → fastboot. Fix `ddeb751` removes ALL SPMI/PON code; sequence is now byte-exact with shim's proven `reset()`: IMEM cookie + dsb + PSCI SYSTEM_RESET, SMC-refused → log + stay alive (never PSHOLD). Snapshot F `9d2b0c86` = reset fix only; snapshot G `051b4329` adds touch heartbeat below.
+- **Touch chain is ALREADY WORKING end-to-end**: boot-046 shows RESET99 release, F01/F12 PDT, 10 slots confirmed, HID loop entered, `backboardd: open SweetHIDTouch -> 0x0` + `open by IOHIDEventServiceUserClient -> 1`, and SWEET LAT logged 3 coherent gestures (bottom-edge drag-up 615,2139→645,1947 over 1.9 s; taps 656,708 + 1079,120 edge). Kernel decodes and dispatches real IOHIDEvents; backboardd holds the service open and never crashed. User-reported "swiping does nothing" is therefore EITHER (a) events filtered in backboardd (missing fields), OR (b) UI too frozen to respond visibly, OR (c) those 3 events were early-boot phantom contacts and real later swipes never decoded. New `POLARIS HID: contact f%u...` heartbeat (throttled raw slot bytes + coords, in poll loop) distinguishes these on the next boot — watch for bursts when the user swipes vs silence.
+- Frame decode assumption in `pt_frame`: Synaptics F12 slot = [status nibble(0 none/1 finger), x_lo, x_hi, y_lo, y_hi, z, wx, wy], reject status!=1 or coords >=1080/2160. `first invalid frame` never fired in boot-046 → all polled frames decoded cleanly (either empty or valid contacts).
+- Touch thread liveness in boot-046 was NOT the pt_wait-deadline hang (thread survived that boot — timing-dependent). Fix `67742b4` (delay() busy-wait + shim reset pulse + IRQ125 input pull-up) is still merged and correct; it only removes the race.
+- Keys work (POLARIS KEYS → SWEET HID key events + AKS traffic) — input pipeline is alive overall.
+- Display: `scaling to 998x2160 content at 41,0` still wrong — full 1125×2436 logical should map across panel. NOT addressed this round.
+- boot-037/038 rings re-analyzed: boot-038 = kernel C rbsec=150 run, shows `mi8gpu_rbsec=150` in boot-args but ZERO `reboot arm` lines → rb thread never started on kernel C (its reset never fired; phone going dark was unrelated). boot-037 = s12-cxhold, step11 PASS, no rbsec flag.
+
+### State & artifacts
+- Branch `polaris-dipper-gpu-20261107-clean` HEAD `968def2` (patch 0102 = 709728 B): step12 gating + SweetFramebuffer LUT/abs-timers + rbsec shim-exact reset + touch heartbeat.
+- polaris-ci snapshots: F `9d2b0c8` (reset fix, push build 42357301373 cancelled by G push), G `051b432` (reset fix + heartbeat, dev build auto-fired; then dispatch RELEASE for the bisect kernel).
+- Prior kernels: `out/ci-42350338098/kernel.release.sweet` (kernel D, boots fine, UNSAFE PON writes — do not use for self-reset); `out/ci-42345837677` (kernel C, rbsec=150 v1 — rb thread never armed, treat as broken).
+- Phone state: dark/off-USB after round-047 wrong landing; needs buttons (power+vol-down ~12 s → fastboot) when the user is back. Series stopped; nothing auto-runs.
+- Next device steps once a RELEASE-G kernel exists and phone is in fastboot: ONE round `mi8gpu=11 cxhold rbsec=180` to validate self-reset→fastboot (the critical gate); then s12 ladder `mi8gpu=12 s12=1..4` rounds; ask user to swipe during the run and check `POLARIS HID: contact` heartbeat lines.
+
+## 2026-11-07 step12 bisect build (supersedes stale sections)
 
 - Clean baseline restored: branch `polaris-dipper-gpu-20261107-clean`, HEAD `1699a19` = 353327a source + step12 gating (`ce366f8`) + SweetFramebuffer perf work; 0102 patch now 701420 B / 15 files, normalized replay over pristine baseline: NORMALIZED_REPLAY_FAIL=0. Previous AI's 8 diagnostic commits (646f7a0..73cc3d8) NOT inherited; `out/dipper-gpu-xnu` re-replayed from baseline.
 - New cmdline-selectable controls in mi8_adreno.c (all default-off, one build supports full bisect without recompile):
