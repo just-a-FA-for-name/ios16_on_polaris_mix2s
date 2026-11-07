@@ -243,7 +243,7 @@ diff --git a/bsd/dev/mi8_adreno.c b/bsd/dev/mi8_adreno.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/mi8_adreno.c
-@@ -0,0 +1,4840 @@
+@@ -0,0 +1,4895 @@
 +/*
 + * The GPU of the Xiaomi Mi 8 (dipper, SDM845): an Adreno 630 (chip id 0x06030001, "qcom,chipid" of the phone's
 + * own device tree), woken step by step. Only with boot-arg mi8gpu=N, which performs steps 1 to N and stops.
@@ -4749,12 +4749,67 @@ new file mode 100644
 +static bool (*const steps[])(void) = { step_gcc, step_rpmh, step_gpucc, step_cx_on, step_clocks, step_gmu_registers, step_smmu_global, step_smmu_contexts, step_gmu_tcm_test, step_gmu_firmware, step_rsc_pdc, step_gmu_smmu, step_trustzone, step_gmu_prepare, step_gmu_start, step_gmu_rail, step_gmu_hfi, step_gpu_look, step_gpu_init, step_gpu_cp, step_gpu_zap, step_gpu_paint };
 +#define STEPS ((uint32_t)(sizeof(steps) / sizeof(steps[0])))
 +
++/* ---- autonomous loop: reset back to fastboot without anyone pressing keys -----------------
++ * The shim's reset() proves the sequence on this phone: write the ABL boot-mode cookie in
++ * IMEM, then a PSCI SYSTEM_RESET (or, if TZ declines, drop PS_HOLD). Arming it as soon as the
++ * probe thread starts also catches a panic: any warm reset afterwards lands in fastboot, where
++ * the test rig boots TWRP and pulls the console ring off userdata. */
++#define MI8_IMEM_RESTART_REASON 0x146aa65cUL
++#define MI8_RESTART_BOOTLOADER  0x77665500U
++#define MI8_PSHOLD              0x0c264000UL
++#define MI8_PSCI_SYSTEM_RESET   0x84000009UL
++
++static void
++mi8_rb_thread(void *parameter, __unused wait_result_t result)
++{
++	uint32_t secs = (uint32_t)(uintptr_t)parameter;
++	vm_offset_t imem = ml_io_map(MI8_IMEM_RESTART_REASON & ~0xfffUL, 0x1000);
++	volatile uint32_t *cookie = (volatile uint32_t *)(imem + (MI8_IMEM_RESTART_REASON & 0xfffUL));
++
++	*cookie = MI8_RESTART_BOOTLOADER;
++	printf("mi8gpu: reboot arm: %u s then reset to fastboot (IMEM cookie already set)\n", secs);
++	for (uint32_t i = 0; i < secs; i++) {
++		sleep_us(1000000);
++	}
++	polaris_gpu_checkpoint("reboot: timer expired");
++	*cookie = MI8_RESTART_BOOTLOADER;
++	__asm__ volatile ("dsb sy" ::: "memory");
++	{
++		register uint64_t x0 __asm__("x0") = MI8_PSCI_SYSTEM_RESET;
++		register uint64_t x1 __asm__("x1") = 0;
++		register uint64_t x2 __asm__("x2") = 0;
++		register uint64_t x3 __asm__("x3") = 0;
++		__asm__ volatile ("smc #0" : "+r" (x0), "+r" (x1), "+r" (x2), "+r" (x3) : :
++		    "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15",
++		    "x16", "x17", "memory", "cc");
++	}
++	/* TZ declined the call: drop PS_HOLD like the shim's reset() does. */
++	{
++		vm_offset_t hold = ml_io_map(MI8_PSHOLD & ~0xfffUL, 0x1000);
++		volatile uint32_t *ps = (volatile uint32_t *)(hold + (MI8_PSHOLD & 0xfffUL));
++		*ps = 0;
++	}
++	for (;;) {
++		__asm__ volatile ("wfe");
++	}
++}
++
 +static void
 +mi8_adreno_thread(void *parameter, __unused wait_result_t result)
 +{
 +	uint32_t last = (uint32_t)(uintptr_t)parameter;
 +
 +	gmu_last_step = last;
++
++	{
++		uint32_t rb = 0;
++		thread_t rb_thread;
++
++		if (PE_parse_boot_argn("mi8gpu_rbsec", &rb, sizeof(rb)) && rb &&
++		    kernel_thread_start(mi8_rb_thread, (void *)(uintptr_t)rb, &rb_thread) == KERN_SUCCESS) {
++			thread_deallocate(rb_thread);
++		}
++	}
 +
 +	{
 +		uint32_t delay_s = 0;
