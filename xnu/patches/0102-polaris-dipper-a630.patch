@@ -337,7 +337,7 @@ diff --git a/bsd/dev/mi8_adreno.c b/bsd/dev/mi8_adreno.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/mi8_adreno.c
-@@ -0,0 +1,5061 @@
+@@ -0,0 +1,4924 @@
 +/*
 + * The GPU of the Xiaomi Mi 8 (dipper, SDM845): an Adreno 630 (chip id 0x06030001, "qcom,chipid" of the phone's
 + * own device tree), woken step by step. Only with boot-arg mi8gpu=N, which performs steps 1 to N and stops.
@@ -4845,143 +4845,20 @@ new file mode 100644
 +
 +/* ---- autonomous loop: reset back to fastboot without anyone pressing keys -----------------
 + * The shim's reset() is the proven sequence on this phone: write the ABL boot-mode cookie in
-+ * IMEM, then PSCI SYSTEM_RESET. The shim's PS_HOLD drop afterwards is NOT repeated here:
-+ * a dropped PS_HOLD powers the phone OFF, and an unattended off-phone is a brick until
-+ * buttons return. If TZ declines the SMC the kernel stays up and says so, which keeps the
-+ * phone reachable and the log full. Arming at probe entry also covers a panic: any warm
-+ * reset afterwards lands in fastboot, where the rig boots TWRP and pulls the ring. */
++ * IMEM, then PSCI SYSTEM_RESET — nothing else. Earlier iterations wrote the PMIC PON
++ * PS_HOLD_RESET_CTL/soft-reboot-spare registers over SPMI to force a hard reset; on polaris
++ * that cleared IMEM and the cookie, so ABL booted normally instead of entering fastboot.
++ * The shim never touches PON: the default warm reset preserves IMEM and lands in fastboot.
++ * The shim's PS_HOLD drop afterwards is NOT repeated here either: a dropped PS_HOLD powers
++ * the phone OFF. If TZ declines the SMC the kernel stays up and says so. Arming at probe
++ * entry also covers a panic: any warm reset afterwards lands in fastboot, where the rig
++ * boots TWRP and pulls the ring. */
 +#define MI8_IMEM_RESTART_REASON 0x146aa65cUL
 +#define MI8_RESTART_BOOTLOADER  0x77665500U
 +#define MI8_PSCI_SYSTEM_RESET   0x84000009UL
 +
-+/* SPMI arbiter v5, EE 0 (same map as sweet_spmi.c / Linux spmi-pmic-arb.c):
-+ * reads over the observer channel, writes over the per-EE rw channel the arbiter
-+ * only honors while apps EE owns the peripheral. PM8998 PON sits on SID 0,
-+ * peripheral 0x08 — the qpnp offsets are the same generation as PM8150's. */
-+#define MI8_SPMI_CORE  0x0c440000UL
-+#define MI8_SPMI_CNFG  0x0c40a000UL
-+#define MI8_SPMI_OBS   0x0e600000UL
-+#define MI8_SPMI_CHNLS 0x0c600000UL
-+#define MI8_PON_SOFT_RB_SPARE    0x88fU
-+#define MI8_PON_REASON_BOOTLOADER 0x02U
-+#define MI8_PON_PS_HOLD_RESET_CTL  0x85aU
-+#define MI8_PON_PS_HOLD_RESET_CTL2 0x85bU
-+#define MI8_PON_RESET_EN         0x80U
-+#define MI8_PON_HARD_RESET       0x7U
-+
-+static vm_offset_t mi8_imem, mi8_spmi_core, mi8_spmi_cnfg, mi8_spmi_obs;
-+static uint32_t mi8_spmi_apids;
++static vm_offset_t mi8_imem;
 +static bool mi8_cookie_ok;
-+
-+static uint32_t
-+mi8_spmi_rd(vm_offset_t base, unsigned off)
-+{
-+	uint32_t v = *(volatile uint32_t *)(base + off);
-+	__asm__ volatile ("dmb oshld" ::: "memory");
-+	return v;
-+}
-+
-+static uint32_t
-+mi8_spmi_find_apid(uint32_t ppid, uint32_t *owner)
-+{
-+	uint32_t found = 0xffff;
-+	for (uint32_t i = 0; i < mi8_spmi_apids; i++) {
-+		uint32_t map = mi8_spmi_rd(mi8_spmi_core, 0x900 + 4 * i);
-+		if (!map || ((map >> 8) & 0xfff) != ppid) {
-+			continue;
-+		}
-+		uint32_t own = mi8_spmi_rd(mi8_spmi_cnfg, 0x700 + 4 * i) & 7;
-+		if (found == 0xffff || own == 0) {
-+			found = i;
-+			*owner = own;
-+		}
-+	}
-+	return found;
-+}
-+
-+static int
-+mi8_spmi_wait(vm_offset_t ch, uint32_t *status)
-+{
-+	for (unsigned i = 0; i < 2000; i++) {
-+		uint32_t st = mi8_spmi_rd(ch, 0x08);
-+		if (st & 1) {
-+			*status = st;
-+			return (st & 0x0e) ? -2 : 0;
-+		}
-+		sleep_us(10);
-+	}
-+	return -3;
-+}
-+
-+static int
-+mi8_spmi_read(uint32_t sid, uint32_t addr, uint8_t *out)
-+{
-+	uint32_t owner = 7, st = 0;
-+	uint32_t apid = mi8_spmi_find_apid((sid << 8) | ((addr >> 8) & 0xff), &owner);
-+	if (apid == 0xffff) {
-+		return -1;
-+	}
-+	vm_offset_t ch = mi8_spmi_obs + 0x80UL * apid;
-+	*(volatile uint32_t *)(ch + 0x00) = (1u << 27) | ((addr & 0xff) << 4);
-+	__asm__ volatile ("dsb osh" ::: "memory");
-+	int rc = mi8_spmi_wait(ch, &st);
-+	if (rc) {
-+		return rc;
-+	}
-+	*out = (uint8_t)(mi8_spmi_rd(ch, 0x18) & 0xff);
-+	return 0;
-+}
-+
-+static int
-+mi8_spmi_write(uint32_t sid, uint32_t addr, uint8_t val)
-+{
-+	uint32_t owner = 7, st = 0;
-+	uint32_t apid = mi8_spmi_find_apid((sid << 8) | ((addr >> 8) & 0xff), &owner);
-+	if (apid == 0xffff || owner != 0) {
-+		return -1;
-+	}
-+	vm_offset_t ch = ml_io_map(MI8_SPMI_CHNLS + 0x10000UL * apid, 0x10000);
-+	if (!ch) {
-+		return -4;
-+	}
-+	*(volatile uint32_t *)(ch + 0x10) = val;
-+	*(volatile uint32_t *)(ch + 0x00) = (0u << 27) | ((addr & 0xff) << 4);
-+	__asm__ volatile ("dsb osh" ::: "memory");
-+	return mi8_spmi_wait(ch, &st);
-+}
-+
-+/* Mirror of the shim's set_hard_reset + set_reboot_bootloader, which the kernel
-+ * lacks: make PS_HOLD resets (PSCI SYSTEM_RESET, TZ watchdog bite) HARD resets —
-+ * ABL leaves WARM_RESET as the reset type and a warm-reset survivor hung this
-+ * phone dark until a long key press — and tell ABL the next boot is fastboot. */
-+static void
-+mi8_arm_bootloader(void)
-+{
-+	uint8_t ctl = 0, ctl2 = 0, rb = 0;
-+	int r1 = mi8_spmi_read(0, MI8_PON_PS_HOLD_RESET_CTL2, &ctl2);
-+	int r2 = mi8_spmi_read(0, MI8_PON_PS_HOLD_RESET_CTL, &ctl);
-+	int r3 = mi8_spmi_read(0, MI8_PON_SOFT_RB_SPARE, &rb);
-+
-+	printf("mi8gpu: pon: reset_ctl %x (rc %d) reset_ctl2 %x (rc %d) rb_spare %x (rc %d)\n",
-+	    ctl, r2, ctl2, r1, rb, r3);
-+	if (!r1 && !r2) {
-+		int w1 = mi8_spmi_write(0, MI8_PON_PS_HOLD_RESET_CTL2, ctl2 & ~MI8_PON_RESET_EN);
-+		sleep_us(1000);
-+		int w2 = mi8_spmi_write(0, MI8_PON_PS_HOLD_RESET_CTL, (ctl & ~0xfU) | MI8_PON_HARD_RESET);
-+		int w3 = mi8_spmi_write(0, MI8_PON_PS_HOLD_RESET_CTL2, ctl2 | MI8_PON_RESET_EN);
-+		printf("mi8gpu: pon: hard-reset writes rc %d/%d/%d\n", w1, w2, w3);
-+	}
-+	if (!r3) {
-+		int w4 = mi8_spmi_write(0, MI8_PON_SOFT_RB_SPARE, (rb & 1) | (MI8_PON_REASON_BOOTLOADER << 1));
-+		printf("mi8gpu: pon: rb_spare write rc %d\n", w4);
-+	}
-+	uint8_t a = 0, b = 0, c = 0;
-+	int ra = mi8_spmi_read(0, MI8_PON_PS_HOLD_RESET_CTL, &a);
-+	int rbb = mi8_spmi_read(0, MI8_PON_PS_HOLD_RESET_CTL2, &b);
-+	int rc2 = mi8_spmi_read(0, MI8_PON_SOFT_RB_SPARE, &c);
-+	printf("mi8gpu: pon after: reset_ctl %x (rc %d) reset_ctl2 %x (rc %d) rb_spare %x (rc %d)\n",
-+	    a, ra, b, rbb, c, rc2);
-+}
 +
 +static uint64_t
 +mi8_fastboot_reset(void)
@@ -5020,27 +4897,13 @@ new file mode 100644
 +	uint64_t rc;
 +
 +	mi8_imem = ml_io_map(MI8_IMEM_RESTART_REASON & ~0xfffUL, 0x1000);
-+	mi8_spmi_core = ml_io_map(MI8_SPMI_CORE, 0x2000);
-+	mi8_spmi_cnfg = ml_io_map(MI8_SPMI_CNFG, 0x1000);
-+	mi8_spmi_obs = ml_io_map(MI8_SPMI_OBS, 0x10000);
 +	mi8_cookie_ok = mi8_imem != 0;
-+	if (mi8_spmi_core && mi8_spmi_cnfg && mi8_spmi_obs) {
-+		mi8_spmi_apids = mi8_spmi_rd(mi8_spmi_core, 4) & 0x7ff;
-+		if (mi8_spmi_apids > 512) {
-+			mi8_spmi_apids = 0;
-+		}
-+	}
 +	if (mi8_cookie_ok) {
 +		*(volatile uint32_t *)(mi8_imem + (MI8_IMEM_RESTART_REASON & 0xfffUL)) = MI8_RESTART_BOOTLOADER;
 +	}
-+	if (mi8_spmi_apids) {
-+		mi8_arm_bootloader();
-+	} else {
-+		printf("mi8gpu: reboot arm: no SPMI; PON registers untouched\n");
-+	}
 +	PE_halt_restart = mi8_halt_restart;
-+	printf("mi8gpu: reboot arm: %u s then reset to fastboot (imem %#lx, apids %u, halt_restart armed)\n",
-+	    secs, mi8_imem, mi8_spmi_apids);
++	printf("mi8gpu: reboot arm: %u s then reset to fastboot (imem %#lx, halt_restart armed)\n",
++	    secs, mi8_imem);
 +	for (uint32_t i = 0; i < secs; i++) {
 +		sleep_us(1000000);
 +	}
