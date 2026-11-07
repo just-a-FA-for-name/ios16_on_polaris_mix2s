@@ -239,6 +239,100 @@
  				}
  			}
  		} else if (src != 0 && s->pixelFormat != SWEET_FB_FORMAT_BGRA) {
+--- a/bsd/dev/polaris_touch_i2c.c
++++ b/bsd/dev/polaris_touch_i2c.c
+@@ -22,12 +22,14 @@
+ extern kern_return_t thread_terminate(thread_t);
+ 
+ #define NORTH_PA       0x03900000u
++#define EAST_PA        0x03500000u
+ #define SDA_CFG        (33u * 0x1000u)
+ #define SCL_CFG        (34u * 0x1000u)
+ #define IO_REG         4u
+ #define SDA           SDA_CFG
+ #define SCL           SCL_CFG
+ #define RESET_CFG     (99u * 0x1000u)
++#define IRQ_CFG       (125u * 0x1000u)
+ #define I2C_ADDR      0x20u
+ #define CFG_MASK      0x3ffu
+ #define IN_PULL_UP    (3u | (2u << 6))
+@@ -38,8 +40,8 @@
+ 
+ static vm_offset_t pt_gpio;
+ static vm_offset_t pt_reset_gpio;
++static vm_offset_t pt_irq_gpio;
+ static uint32_t saved_sda_cfg, saved_scl_cfg, saved_sda_io, saved_scl_io;
+-static int pt_sleep_chan;
+ static bool pt_started;
+ static bool pt_hid_enabled;
+ static bool pt_reset_enabled;
+@@ -251,13 +253,13 @@
+ 	return ok;
+ }
+ 
++/* Busy-wait, never a scheduler sleep: this thread's first pt_wait(200) landed
++ * inside the MP bring-up window on hardware and never returned (the identical
++ * deadline wait in polaris_keys is fine later). Bounded and unblockable. */
+ static void
+ pt_wait(unsigned ms)
+ {
+-	uint64_t deadline;
+-	clock_interval_to_deadline(ms, NSEC_PER_MSEC, &deadline);
+-	(void)assert_wait_deadline(&pt_sleep_chan, THREAD_UNINT, deadline);
+-	thread_block(THREAD_CONTINUE_NULL);
++	delay((int)ms * 1000);
+ }
+ 
+ static void
+@@ -360,8 +362,9 @@
+ 	uint8_t raw[MAX_FINGERS * FINGER_BYTES] = {0};
+ 	pt_gpio = ml_io_map(NORTH_PA, 0x23000);
+ 	pt_reset_gpio = ml_io_map(NORTH_PA + RESET_CFG, 0x1000);
+-	if (!pt_gpio || !pt_reset_gpio) {
+-		printf("POLARIS I2C: TLMM north map failed\n");
++	pt_irq_gpio = ml_io_map(EAST_PA + IRQ_CFG, 0x1000);
++	if (!pt_gpio || !pt_reset_gpio || !pt_irq_gpio) {
++		printf("POLARIS I2C: TLMM map failed\n");
+ 		goto done;
+ 	}
+ 	saved_sda_cfg = pt_rd(SDA);
+@@ -370,18 +373,25 @@
+ 	saved_scl_io = pt_rd(SCL + IO_REG);
+ 	printf("POLARIS I2C: RESET99 before cfg=0x%x io=0x%x\n",
+ 	    pt_reset_rd(0), pt_reset_rd(IO_REG));
++	if (pt_irq_gpio) {
++		uint32_t icfg = *(volatile uint32_t *)(pt_irq_gpio);
++		/* IRQ pin 125 (east tile): shim configures mux0, pull-up, input. */
++		__asm__ volatile("dmb oshst" ::: "memory");
++		*(volatile uint32_t *)(pt_irq_gpio) = (icfg & ~CFG_MASK) | 3u;
++		__asm__ volatile("dsb osh" ::: "memory");
++		printf("POLARIS I2C: IRQ125 cfg 0x%x -> 0x%x\n", icfg,
++		    *(volatile uint32_t *)(pt_irq_gpio));
++	}
+ 	if (pt_reset_enabled) {
+-		uint32_t cfg = pt_reset_rd(0);
+-		uint32_t io = pt_reset_rd(IO_REG);
+-		/* Only release an already asserted, GPIO-output active-low reset.
+-		 * No low pulse, no VIO23 or PMIC change. Leave it deasserted. */
+-		if ((cfg & CFG_MASK) != 0x201u || (io & 2u)) {
+-			printf("POLARIS I2C: RESET99 not asserted as expected; refusing reset release\n");
+-			goto restore;
+-		}
+-		pt_reset_wr(IO_REG, io | 2u);
+-		pt_wait(200);
+-		printf("POLARIS I2C: RESET99 released cfg=0x%x io=0x%x\n",
++		/* Shim-proven sequence: latch low, output-enable, 10 ms pulse, then
++		 * drive high and settle 200 ms. Previous code only drove high without
++		 * the preceding low pulse; an already-floating reset never fell. */
++		pt_reset_wr(IO_REG, pt_reset_rd(IO_REG) & ~2u);
++		pt_reset_wr(0, (pt_reset_rd(0) & ~CFG_MASK) | 0x200u);
++		delay(10000);
++		pt_reset_wr(IO_REG, pt_reset_rd(IO_REG) | 2u);
++		delay(200000);
++		printf("POLARIS I2C: RESET99 pulsed+released cfg=0x%x io=0x%x\n",
+ 		    pt_reset_rd(0), pt_reset_rd(IO_REG));
+ 		if (!(pt_reset_rd(IO_REG) & 1u)) {
+ 			printf("POLARIS I2C: RESET99 pad did not rise\n");
 diff --git a/bsd/dev/mi8_adreno.c b/bsd/dev/mi8_adreno.c
 new file mode 100644
 --- /dev/null
