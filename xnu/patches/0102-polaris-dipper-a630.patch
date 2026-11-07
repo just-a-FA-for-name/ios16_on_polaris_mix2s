@@ -380,7 +380,7 @@ diff --git a/bsd/dev/mi8_adreno.c b/bsd/dev/mi8_adreno.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/mi8_adreno.c
-@@ -0,0 +1,4939 @@
+@@ -0,0 +1,4936 @@
 +/*
 + * The GPU of the Xiaomi Mi 8 (dipper, SDM845): an Adreno 630 (chip id 0x06030001, "qcom,chipid" of the phone's
 + * own device tree), woken step by step. Only with boot-arg mi8gpu=N, which performs steps 1 to N and stops.
@@ -4935,12 +4935,22 @@ new file mode 100644
 +}
 +
 +static void
-+mi8_rb_thread(void *parameter, __unused wait_result_t result)
++mi8_rb_fire(__unused void *arg)
 +{
-+	uint32_t secs = (uint32_t)(uintptr_t)parameter;
 +	uint64_t rc;
 +
-+	printf("mi8gpu: rb alive secs=%u\n", secs);
++	polaris_gpu_checkpoint("reboot: timer expired");
++	rc = mi8_fastboot_reset();
++	/* Only reached when TZ declined the reset: stay up, stay reachable. */
++	printf("mi8gpu: PSCI SYSTEM_RESET returned %#llx; staying up (no PS_HOLD drop)\n", rc);
++	polaris_gpu_checkpoint("reboot: smc refused");
++}
++
++static void
++mi8_rb_arm(uint32_t secs)
++{
++	struct timespec ts = { (time_t)secs, 0 };
++
 +	/* phystokv is the physmap translation: no VM allocation, cannot block. Verify
 +	 * the round trip with kvtophys before trusting it; fall back to ml_io_map. */
 +	mi8_imem = phystokv(MI8_IMEM_RESTART_REASON);
@@ -4956,19 +4966,11 @@ new file mode 100644
 +		*(volatile uint32_t *)mi8_imem = MI8_RESTART_BOOTLOADER;
 +	}
 +	PE_halt_restart = mi8_halt_restart;
++	/* bsd_timeout runs on the callout thread: it fires even when a dedicated
++	 * thread would never be scheduled — the thread version randomly did not. */
++	bsd_timeout(mi8_rb_fire, NULL, &ts);
 +	printf("mi8gpu: reboot arm: %u s then reset to fastboot (cookie va %#lx, halt_restart armed)\n",
 +	    secs, mi8_imem);
-+	for (uint32_t i = 0; i < secs; i++) {
-+		sleep_us(1000000);
-+	}
-+	polaris_gpu_checkpoint("reboot: timer expired");
-+	rc = mi8_fastboot_reset();
-+	/* Only reached when TZ declined the reset: stay up, stay reachable. */
-+	printf("mi8gpu: PSCI SYSTEM_RESET returned %#llx; staying up (no PS_HOLD drop)\n", rc);
-+	polaris_gpu_checkpoint("reboot: smc refused");
-+	for (;;) {
-+		sleep_us(1000000);
-+	}
 +}
 +
 +static void
@@ -4980,15 +4982,10 @@ new file mode 100644
 +
 +	{
 +		uint32_t rb = 0;
-+		thread_t rb_thread;
 +
 +		if (PE_parse_boot_argn("mi8gpu_rbsec", &rb, sizeof(rb)) && rb) {
-+			printf("mi8gpu: rbsec=%u parsed; starting reset thread\n", rb);
-+			kern_return_t kr = kernel_thread_start(mi8_rb_thread, (void *)(uintptr_t)rb, &rb_thread);
-+			printf("mi8gpu: rb thread start rc=%d\n", kr);
-+			if (kr == KERN_SUCCESS) {
-+				thread_deallocate(rb_thread);
-+			}
++			printf("mi8gpu: rbsec=%u parsed; arming callout reset\n", rb);
++			mi8_rb_arm(rb);
 +		}
 +	}
 +
