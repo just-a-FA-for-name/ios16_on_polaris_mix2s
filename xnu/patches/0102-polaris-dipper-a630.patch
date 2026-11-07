@@ -57,6 +57,188 @@
  
  __startup_data static struct mach_vm_range io_range;
  static SECURITY_READ_ONLY_LATE(vm_map_t) io_submap;
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -124,6 +124,10 @@
+ 	uint8_t       fPending[SWEET_FB_SWAP_REC_SIZE];     /* latest swap, not yet shown */
+ 	bool          fDirty;
+ 	uint32_t      fPresentPeriodUS; /* copy cadence, independent of vsync */
++	AbsoluteTime  fVsyncPeriod;   /* vsync period in mach ticks */
++	AbsoluteTime  fNextVsync;     /* next vsync deadline (0: arm from now) */
++	AbsoluteTime  fPresentPeriod; /* present period in mach ticks */
++	AbsoluteTime  fNextPresent;   /* next present deadline (0: arm from now) */
+ 	bool          fPowerOff;      /* RequestPowerChange(0) */
+ 	uint32_t      fFadeStep;      /* fade-out steps done while off */
+ 
+@@ -244,6 +248,10 @@
+ 		OSSafeReleaseNULL(fVsync);
+ 		return false;
+ 	}
++	nanoseconds_to_absolutetime(SWEET_FB_VSYNC_US * (uint64_t)NSEC_PER_USEC, &fVsyncPeriod);
++	nanoseconds_to_absolutetime((uint64_t)fPresentPeriodUS * NSEC_PER_USEC, &fPresentPeriod);
++	fNextVsync = 0;
++	fNextPresent = 0;
+ 	fVsync->setTimeoutUS(SWEET_FB_VSYNC_US);
+ 	fPresentTimer->setTimeoutUS(fPresentPeriodUS);
+ 	IOLog("SWEET PACE: independent vsync 60 Hz, panel-copy target %u Hz\n", hz);
+@@ -263,9 +271,15 @@
+ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
+ {
+ 	AppleCLCD *fb = (AppleCLCD *)owner;
+-	/* Arm before dispatch, not after a full-frame copy. Overrun callbacks
+-	 * coalesce in their own work loop instead of building a frame queue. */
+-	sender->setTimeoutUS(SWEET_FB_VSYNC_US);
++	/* Arm an absolute deadline before dispatch: a relative timeout arms
++	 * period-plus-entry-latency each tick (17.7 ms observed for the 16.67
++	 * ms request, i.e. ~56.6 Hz); absolute deadlines keep a true 60 Hz. */
++	AbsoluteTime now_abs = mach_absolute_time();
++	if (fb->fNextVsync == 0 || fb->fNextVsync < now_abs) {
++		fb->fNextVsync = now_abs;
++	}
++	fb->fNextVsync += fb->fVsyncPeriod;
++	sender->wakeAtTime(fb->fNextVsync);
+ 	uint64_t now = mach_absolute_time();
+ 	uint64_t gap = fb->fLastVsync ? now - fb->fLastVsync : 0;
+ 	fb->fLastVsync = now;
+@@ -297,9 +311,14 @@
+ AppleCLCD::presentFired(OSObject *owner, IOTimerEventSource *sender)
+ {
+ 	AppleCLCD *fb = (AppleCLCD *)owner;
+-	/* Timer armed from callback entry: copy time is inside the requested
+-	 * period, rather than an extra delay added after every frame. */
+-	sender->setTimeoutUS(fb->fPresentPeriodUS);
++	/* Absolute deadline, same reason as the vsync timer: a relative arm
++	 * would add the workloop's entry latency to every period. */
++	AbsoluteTime now_abs = mach_absolute_time();
++	if (fb->fNextPresent == 0 || fb->fNextPresent < now_abs) {
++		fb->fNextPresent = now_abs;
++	}
++	fb->fNextPresent += fb->fPresentPeriod;
++	sender->wakeAtTime(fb->fNextPresent);
+ 	IOLockLock(fb->fLock);
+ 	if (fb->fPowerOff) {
+ 		/* Fade out: halve every channel each vsync, then black, then idle. */
+@@ -441,6 +460,29 @@
+ 			return;
+ 		}
+ 	}
++}
++
++/* Destination-column -> source-column table for the scaled copy.  The x
++ * mapping only depends on the fixed panel geometry and the per-swap
++ * (dx, sx, w) triplet; the latter is constant for every real swap, so the
++ * table is built once and every frame's inner loop is a pure gather. */
++#define SWEET_FB_MAX_COLS       2048
++static int32_t sweet_scale_col_lut[SWEET_FB_MAX_COLS];
++static int32_t sweet_scale_col_key[3] = { -1, -1, -1 };
++
++static void
++sweet_scale_col_lut_build(uint32_t width, int32_t offX, uint32_t contentW,
++    uint32_t logicalW, int32_t dx, int32_t sx, int32_t w)
++{
++	uint64_t xstep = ((uint64_t)logicalW << 16) / contentW;
++	for (uint32_t x = 0; x < width && x < SWEET_FB_MAX_COLS; x++) {
++		uint64_t xpos = (uint64_t)(x - offX) * xstep;
++		int32_t lx = (int32_t)(xpos >> 16);
++		sweet_scale_col_lut[x] = (lx >= dx && lx < dx + w) ? sx + lx - dx : -1;
++	}
++	sweet_scale_col_key[0] = dx;
++	sweet_scale_col_key[1] = sx;
++	sweet_scale_col_key[2] = w;
+ }
+ 
+ void
+@@ -611,6 +653,12 @@
+ 			if (py1 > (int32_t)fHeight) {
+ 				py1 = (int32_t)fHeight;
+ 			}
++			if (fWidth <= SWEET_FB_MAX_COLS &&
++			    (sweet_scale_col_key[0] != dx || sweet_scale_col_key[1] != sx ||
++			     sweet_scale_col_key[2] != w)) {
++				sweet_scale_col_lut_build(fWidth, fOffX, fContentW, fLogicalW, dx, sx, w);
++			}
++			bool use_lut = fWidth <= SWEET_FB_MAX_COLS;
+ 			uint64_t xstep = ((uint64_t)fLogicalW << 16) / fContentW;
+ 			for (int32_t y = py0; y < py1; y++) {
+ 				int32_t ly = (int32_t)(((int64_t)(y - fOffY) * fLogicalH) / fContentH);
+@@ -621,6 +669,14 @@
+ 				uint32_t *drow = (uint32_t *)(fPixels + (uint64_t)y * fRowBytes);
+ 				uint64_t xpos = (uint64_t)(px0 - fOffX) * xstep;
+ 				for (int32_t x = px0; x < px1; x++) {
++					if (use_lut) {
++						int32_t si = sweet_scale_col_lut[x];
++						if (si >= 0) {
++							drow[x] = sweet_fb_pixel(s, src, src_offset, src_bpr,
++							    alpha_offset, alpha_bpr, si, syy);
++						}
++						continue;
++					}
+ 					int32_t lx = (int32_t)(xpos >> 16);
+ 					xpos += xstep;
+ 					if (lx < dx || lx >= dx + w) {
+@@ -648,24 +704,47 @@
+ 			if (py1 > (int32_t)fHeight) {
+ 				py1 = (int32_t)fHeight;
+ 			}
+-			uint64_t xstep = ((uint64_t)fLogicalW << 16) / fContentW;
+-			for (int32_t y = py0; y < py1; y++) {
+-				int32_t ly = (int32_t)(((int64_t)(y - fOffY) * fLogicalH) / fContentH);
+-				int32_t syy = sy + ly - dy;
+-				if (syy < sy || syy >= sy + h) {
+-					continue;
++			if (fWidth <= SWEET_FB_MAX_COLS) {
++				if (sweet_scale_col_key[0] != dx || sweet_scale_col_key[1] != sx ||
++				    sweet_scale_col_key[2] != w) {
++					sweet_scale_col_lut_build(fWidth, fOffX, fContentW, fLogicalW, dx, sx, w);
+ 				}
+-				uint32_t *drow = (uint32_t *)(fPixels + (uint64_t)y * fRowBytes);
+-				const uint32_t *srow = (const uint32_t *)(src + src_offset +
+-				    (uint64_t)syy * src_bpr);
+-				uint64_t xpos = (uint64_t)(px0 - fOffX) * xstep;
+-				for (int32_t x = px0; x < px1; x++) {
+-					int32_t lx = (int32_t)(xpos >> 16);
+-					xpos += xstep;
+-					if (lx < dx || lx >= dx + w) {
++				for (int32_t y = py0; y < py1; y++) {
++					int32_t ly = (int32_t)(((int64_t)(y - fOffY) * fLogicalH) / fContentH);
++					int32_t syy = sy + ly - dy;
++					if (syy < sy || syy >= sy + h) {
+ 						continue;
+ 					}
+-					drow[x] = srow[sx + lx - dx];
++					uint32_t *drow = (uint32_t *)(fPixels + (uint64_t)y * fRowBytes);
++					const uint32_t *srow = (const uint32_t *)(src + src_offset +
++					    (uint64_t)syy * src_bpr);
++					for (int32_t x = px0; x < px1; x++) {
++						int32_t si = sweet_scale_col_lut[x];
++						if (si >= 0) {
++							drow[x] = srow[si];
++						}
++					}
++				}
++			} else {
++				uint64_t xstep = ((uint64_t)fLogicalW << 16) / fContentW;
++				for (int32_t y = py0; y < py1; y++) {
++					int32_t ly = (int32_t)(((int64_t)(y - fOffY) * fLogicalH) / fContentH);
++					int32_t syy = sy + ly - dy;
++					if (syy < sy || syy >= sy + h) {
++						continue;
++					}
++					uint32_t *drow = (uint32_t *)(fPixels + (uint64_t)y * fRowBytes);
++					const uint32_t *srow = (const uint32_t *)(src + src_offset +
++					    (uint64_t)syy * src_bpr);
++					uint64_t xpos = (uint64_t)(px0 - fOffX) * xstep;
++					for (int32_t x = px0; x < px1; x++) {
++						int32_t lx = (int32_t)(xpos >> 16);
++						xpos += xstep;
++						if (lx < dx || lx >= dx + w) {
++							continue;
++						}
++						drow[x] = srow[sx + lx - dx];
++					}
+ 				}
+ 			}
+ 		} else if (src != 0 && s->pixelFormat != SWEET_FB_FORMAT_BGRA) {
 diff --git a/bsd/dev/mi8_adreno.c b/bsd/dev/mi8_adreno.c
 new file mode 100644
 --- /dev/null
