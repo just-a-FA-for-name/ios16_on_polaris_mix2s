@@ -1,4 +1,23 @@
-﻿## CURRENT 2026-11-08 ~17:10 SNAPSHOT Q pushed -- exec_inject + IOAcceleratorES publish in sweetfb (CI 42464964411 building)
+﻿## CURRENT 2026-11-08 ~17:40 SNAPSHOT R ready to push -- /redwood installer + 20H392-ported inject lib (Q CI 42464964411 re-running after transient KDK failure)
+
+### ABI finding (blocks naive injection): polaris root = iOS 16.7.16/20H392, dipper donor = 16.5/20F66
+- inject.c's window-server hooks are hardcoded 20F66 unslid addresses; the 16.5 prebuilt libredwood.dylib would verify-fail (all replace_virtual bail safely, but nothing hooks). **Ported to 20H392**: `wifi-port/inject_polaris_20h392.c` (copied into WSL `/opt/polaris-dipper-userland/userland/src/inject_polaris.c`), 17 constant replacements from `device-private/dipper-graphics-abi-20H392.json`:
+  - VT_APPLE_CLCD_DISPLAY 0x1d5b44520->0x1d5b38788, VT_EAGL_SERVER 0x1d5b45c58->0x1d5b39ed0, VT_GLES_CONTEXT 0x1d5b3b540->0x1d5b2f6e8
+  - begin_update slot 0x170->0x178 + func 0x1882e6798, finish_update 0x178->0x180 + 0x1882d0f88; is_ready 0x1882f9318, ignore_update_p 0x1882e9684, renderer 0x1882eaf3c, render_update 0x1883601dc, function_supported 0x1884b2164, function_uniform 0x1884b21ac, compile_shader 0x1884053fc
+  - Stubbed 0 (safe self-disable; not needed v1): CA_SHADER_TABLE (glsb3 only), MTL_DEVICE_ARRAY + CA_DETECT_DISPLAYS (detectDisplays hook won't install; no Metal device exists w/o plugin props), waitForALSArrival (unused), personasAreSupported (containermanagerd not injected)
+- **Built**: `obj/libredwood-polaris.dylib` 92400 B sha256 22ddba3ae81770b57fbfaf40a33201a13365dd0e26890148430e6c5e1536d3cb (xnu-clang + iPhoneOS16.5.sdk + ldid -S), copied to `out/dipper-userland-20261106/`. Deps: CoreFoundation/IOKit/libobjc/libSystem only.
+- eagl.c audited: no CA-internal hardcoded addresses except CACHE_BASE 0x180000000 (same convention); safe for 20H392.
+- input_start() opens /dev/redwood-touch which does not exist on polaris -> thread exits harmlessly (polaris touch path is native).
+- libredwood-sb (SpringBoard) NOT ported yet; installer ships it only if the blob is present.
+
+### Snapshot R content (patch regenerated, 736247 B; pending push)
+1. New `bsd/dev/polaris_redwood_install.c` (added to bsd/conf/files): board+arg-gated VFS installer. `redwoodinstall=1` mkdirs /redwood{,/lib,/bin} and installs payload blobs (RedwoodLibRW->libredwood.dylib, RedwoodLibGL->libredwood-gl.dylib, RedwoodLibOSMesa->libOSMesa.8.dylib, RedwoodGlTest->gl_test; RedwoodLibSB optional). `redwoodinject=1` seeds kern.exec_inject via new `exec_inject_set()` (blob "RedwoodInject" override, else default `/redwood/lib/libredwood.dylib backboardd`) only if the lib file verifies readable on the root.
+2. `bsd/kern/kern_exec.c`: added `exec_inject_set()` (SWEET-only) writing exec_inject_conf when empty.
+3. `bsd/kern/bsd_init.c`: call `polaris_redwood_install()` after poster maintenance, before load_init_program.
+4. `build_image.ps1`: `-Redwood` switch adds the four blobs + `redwoodinstall=1 redwoodinject=1` args; `-Step -1` gives `gpu=1` (metal arg dropped -- no plugin props this round).
+- Boot recipe for the R test: `-InputOn -Redwood -Step -1 -RbSec 0` => gpu=1 + touch/keys + install + inject. Expected ring: POLARIS REDWOOD install lines + exec_inject seeded + backboardd inject say() lines + "the server has an accelerated renderer" / GL hook lines, or precise failure points.
+- The inject lib's opengl_es() requires service "RedwoodGPU" present when backboardd starts (gpu=1 path registers it in mi8_adreno_init) OR gl=1.
+## CURRENT 2026-11-08 ~17:10 SNAPSHOT Q pushed -- exec_inject + IOAcceleratorES publish in sweetfb (CI 42464964411 building)
 
 ### Boot 088 result recap (kernel P, `gpu=1 metal=1`)
 - UI reached, touch OK, still software-rendered (expected). Ring proved `gpu=1` chain ran (ZAP auth + non-secure, no teardown) and that backboardd still got `0 found` on IOAcceleratorES -- because this build runs **SweetFramebuffer**, and the stub only lived in MiniIOMobileFramebuffer.

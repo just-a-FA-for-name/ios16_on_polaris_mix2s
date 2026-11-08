@@ -1,9 +1,10 @@
 --- a/bsd/conf/files
 +++ b/bsd/conf/files
-@@ -118,6 +118,9 @@
+@@ -118,6 +118,10 @@
  bsd/dev/polaris_keys.c			standard
  bsd/dev/polaris_preview_install.c	standard
  bsd/dev/polaris_poster_maintenance.c	standard
++bsd/dev/polaris_redwood_install.c	standard
 +bsd/dev/mi8_adreno.c			standard
 +bsd/dev/redwood_adreno.c		standard
 +bsd/dev/polaris_dipper_compat.c	standard
@@ -210,9 +211,20 @@
  	if (kernel_thread_start(sweet_log_thread, NULL, &thread) == KERN_SUCCESS) {
  		thread_deallocate(thread);
  	}
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -1105,6 +1105,8 @@
+ 	polaris_preview_install();
+ 	extern void polaris_poster_maintenance_install(void);
+ 	polaris_poster_maintenance_install();
++	extern void polaris_redwood_install(void);
++	polaris_redwood_install();
+ #endif
+ 	load_init_program(p);
+ 	lock_trace = 1;
 --- a/bsd/kern/kern_exec.c
 +++ b/bsd/kern/kern_exec.c
-@@ -5574,8 +5574,73 @@
+@@ -5574,8 +5574,86 @@
   */
  __attribute__((noinline))
  static int
@@ -229,6 +241,19 @@
 +static char exec_inject_conf[512];
 +SYSCTL_STRING(_kern, OID_AUTO, exec_inject, CTLFLAG_RW | CTLFLAG_LOCKED, exec_inject_conf, sizeof(exec_inject_conf),
 +    "LIBRARY NAME... [; LIBRARY NAME...]: programs started with the library inserted");
++
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++/* The polaris boot has no early user space to write the sysctl: the kernel's
++ * redwood installer seeds the table before launchd runs (see
++ * bsd/dev/polaris_redwood_install.c). Ignored once a configuration is in. */
++void
++exec_inject_set(const char *conf)
++{
++	if (exec_inject_conf[0] == 0) {
++		strlcpy(exec_inject_conf, conf, sizeof(exec_inject_conf));
++	}
++}
++#endif
 +
 +static bool
 +exec_inject_env(struct image_params *imgp, char *env, size_t size)
@@ -286,7 +311,7 @@
  	int error = 0;
  	int     ptr_size = (imgp->ip_flags & IMGPF_WAS_64BIT_ADDR) ? 8 : 4;
  	int new_ptr_size = (imgp->ip_flags & IMGPF_IS_64BIT_ADDR) ? 8 : 4;
-@@ -5742,6 +5807,20 @@
+@@ -5742,6 +5820,20 @@
  			goto bad;
  		}
  		imgp->ip_argspace -= new_ptr_size; /* to hold envv[] entry */
@@ -10560,6 +10585,295 @@ new file mode 100644
 +	return 0;
 +}
 +#endif /* ARM64_BOARD_CONFIG_SWEET */
+diff --git a/bsd/dev/polaris_redwood_install.c b/bsd/dev/polaris_redwood_install.c
+new file mode 100644
+--- /dev/null
++++ b/bsd/dev/polaris_redwood_install.c
+@@ -0,0 +1,284 @@
++/* Board-gated VFS installer for the redwood user space that the dipper
++ * userland bring-up expects at /redwood: the inject library, the OpenGL ES
++ * bridge and Mesa behind it. Default is off. Files are supplied in reserved
++ * boot payload blobs, never downloaded by the kernel. Only the /redwood
++ * paths below are created or written; existing files are replaced only
++ * after their bytes differ, and every write is read back and compared.
++ *
++ * redwoodinstall=1  create /redwood{,/lib,/bin} and install every blob that
++ *                   is present in the payload.
++ * redwoodinject=1   seed kern.exec_inject (the DYLD_INSERT_LIBRARIES table
++ *                   exec applies) with the blob "RedwoodInject" if present,
++ *                   else with the default backboardd entry below.
++ *
++ * The two are separate on purpose: installing the files cannot change how
++ * the system runs; only the inject table activates the library inside
++ * backboardd, and it is verified first that every file the table needs is
++ * in place and reads back identical to the payload blob.
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <sys/errno.h>
++#include <sys/fcntl.h>
++#include <sys/uio.h>
++#include <sys/namei.h>
++#include <sys/vnode.h>
++#include <sys/vnode_internal.h>
++#include <kern/kalloc.h>
++#include <machine/machine_routines.h>
++#include <pexpert/pexpert.h>
++#include <pexpert/device_tree.h>
++
++extern bool polaris_touch_i2c_board(void);
++void polaris_redwood_install(void);
++
++#define RW_MAX_BLOB (24u * 1024u * 1024u)   /* libOSMesa is ~15 MB */
++#define RW_INJECT_DEFAULT "/redwood/lib/libredwood.dylib backboardd"
++
++struct rw_blob { const uint8_t *bytes; uint32_t size; };
++
++struct rw_file {
++	const char *blob;
++	const char *path;
++	uint32_t    min_size;
++};
++
++/* The smallest set that makes the window server draw on the GPU: the inject
++ * library (dlopen'd inside backboardd), the EAGL bridge and Mesa itself.
++ * libredwood-sb is installed for later use (SpringBoard fixes) but the
++ * default inject table does not name it. gl_test is for a manual check. */
++static const struct rw_file rw_files[] = {
++	{ "RedwoodLibRW",    "/redwood/lib/libredwood.dylib",      4096 },
++	{ "RedwoodLibSB",    "/redwood/lib/libredwood-sb.dylib",   4096 },
++	{ "RedwoodLibGL",    "/redwood/lib/libredwood-gl.dylib",   4096 },
++	{ "RedwoodLibOSMesa","/redwood/lib/libOSMesa.8.dylib",     1u << 20 },
++	{ "RedwoodGlTest",   "/redwood/bin/gl_test",               4096 },
++};
++
++static bool
++rw_u64(DTEntry node, const char *key, uint64_t *value)
++{
++	const void *p = NULL;
++	unsigned int length = 0;
++	if (SecureDTGetProperty(node, key, &p, &length) != kSuccess ||
++	    p == NULL || length != sizeof(*value)) {
++		return false;
++	}
++	memcpy(value, p, sizeof(*value));
++	return true;
++}
++
++static bool
++rw_blob_get(const char *name, struct rw_blob *blob)
++{
++	DTEntry chosen, map;
++	const void *p = NULL;
++	unsigned int length = 0;
++	uint64_t base, memory_size, pair[2];
++	if (SecureDTLookupEntry(NULL, "/chosen", &chosen) != kSuccess ||
++	    SecureDTLookupEntry(NULL, "/chosen/memory-map", &map) != kSuccess ||
++	    !rw_u64(chosen, "dram-base", &base) ||
++	    !rw_u64(chosen, "dram-size", &memory_size) ||
++	    base + memory_size < base ||
++	    SecureDTGetProperty(map, name, &p, &length) != kSuccess ||
++	    p == NULL || length != sizeof(pair)) {
++		return false;
++	}
++	memcpy(pair, p, sizeof(pair));
++	if ((pair[0] & 0x3fffull) || pair[1] == 0 || pair[1] > RW_MAX_BLOB ||
++	    pair[0] < base || pair[0] + pair[1] < pair[0] ||
++	    pair[0] + pair[1] > base + memory_size) {
++		return false;
++	}
++	vm_offset_t address = ml_static_ptovirt((vm_offset_t)pair[0]);
++	if (address == 0) {
++		return false;
++	}
++	blob->bytes = (const uint8_t *)address;
++	blob->size = (uint32_t)pair[1];
++	return true;
++}
++
++static int
++rw_mkdir(const char *path, vfs_context_t ctx)
++{
++	struct nameidata nd;
++	struct vnode_attr va;
++	int error;
++
++	NDINIT(&nd, CREATE, OP_MKDIR, LOCKPARENT | NOFOLLOW, UIO_SYSSPACE,
++	    CAST_USER_ADDR_T(path), ctx);
++	nd.ni_cnd.cn_flags |= WILLBEDIR;
++	error = namei(&nd);
++	if (error) {
++		return error;
++	}
++	if (nd.ni_vp != NULLVP) {
++		int isdir = vnode_isdir(nd.ni_vp);
++		vnode_put(nd.ni_vp);
++		vnode_put(nd.ni_dvp);
++		nameidone(&nd);
++		return isdir ? 0 : ENOTDIR;
++	}
++	VATTR_INIT(&va);
++	VATTR_SET(&va, va_mode, 0755);
++	VATTR_SET(&va, va_type, VDIR);
++	error = VNOP_MKDIR(nd.ni_dvp, &nd.ni_vp, &nd.ni_cnd, &va, ctx);
++	if (nd.ni_vp != NULLVP) {
++		vnode_put(nd.ni_vp);
++	}
++	vnode_put(nd.ni_dvp);
++	nameidone(&nd);
++	return error;
++}
++
++static int
++rw_compare(const char *path, const struct rw_blob *blob, bool *equal)
++{
++	vfs_context_t ctx = vfs_context_kernel();
++	vnode_t vp = NULLVP;
++	*equal = false;
++	int error = vnode_open(path, FREAD | O_NOFOLLOW, 0, 0, &vp, ctx);
++	if (error) {
++		return error;
++	}
++	struct vnode_attr attr;
++	VATTR_INIT(&attr);
++	VATTR_WANTED(&attr, va_data_size);
++	error = vnode_getattr(vp, &attr, ctx);
++	if (!error && attr.va_data_size == blob->size) {
++		uint8_t *buffer = kalloc_data(blob->size, Z_WAITOK);
++		if (buffer == NULL) {
++			error = ENOMEM;
++		} else {
++			int residual = 0;
++			error = vn_rdwr(UIO_READ, vp, (caddr_t)buffer, (int)blob->size,
++			    0, UIO_SYSSPACE, 0, vfs_context_ucred(ctx), &residual,
++			    vfs_context_proc(ctx));
++			if (!error && residual == 0) {
++				*equal = memcmp(buffer, blob->bytes, blob->size) == 0;
++			}
++			if (!error && residual != 0) {
++				error = EIO;
++			}
++			kfree_data(buffer, blob->size);
++		}
++	}
++	int closed = vnode_close(vp, FREAD, ctx);
++	return error ? error : closed;
++}
++
++static int
++rw_write(const char *path, const struct rw_blob *blob)
++{
++	vfs_context_t ctx = vfs_context_kernel();
++	vnode_t vp = NULLVP;
++	int error = vnode_open(path, FWRITE | O_CREAT | O_TRUNC | O_NOFOLLOW,
++	    0755, 0, &vp, ctx);
++	if (error) {
++		return error;
++	}
++	int residual = 0;
++	error = vn_rdwr(UIO_WRITE, vp, (caddr_t)blob->bytes, (int)blob->size,
++	    0, UIO_SYSSPACE, IO_SYNC | IO_UNIT, vfs_context_ucred(ctx), &residual,
++	    vfs_context_proc(ctx));
++	if (!error && residual != 0) {
++		error = EIO;
++	}
++	int closed = vnode_close(vp, FWRITE, ctx);
++	if (!error) {
++		error = closed;
++	}
++	bool same = false;
++	if (!error) {
++		error = rw_compare(path, blob, &same);
++	}
++	if (!error && !same) {
++		error = EIO;
++	}
++	return error;
++}
++
++void
++polaris_redwood_install(void)
++{
++	int install = 0, inject = 0;
++	if (!polaris_touch_i2c_board()) {
++		return;
++	}
++	(void)PE_parse_boot_argn("redwoodinstall", &install, sizeof(install));
++	(void)PE_parse_boot_argn("redwoodinject", &inject, sizeof(inject));
++	if (install != 1 && inject != 1) {
++		return;
++	}
++	vfs_context_t ctx = vfs_context_kernel();
++	if (install == 1) {
++		static const char *dirs[] = { "/redwood", "/redwood/lib", "/redwood/bin" };
++		for (unsigned i = 0; i < sizeof(dirs) / sizeof(dirs[0]); i++) {
++			int error = rw_mkdir(dirs[i], ctx);
++			if (error) {
++				printf("POLARIS REDWOOD: mkdir %s failed %d; no writes\n", dirs[i], error);
++				return;
++			}
++		}
++		unsigned written = 0, unchanged = 0, absent = 0;
++		for (unsigned i = 0; i < sizeof(rw_files) / sizeof(rw_files[0]); i++) {
++			const struct rw_file *f = &rw_files[i];
++			struct rw_blob blob;
++			if (!rw_blob_get(f->blob, &blob)) {
++				absent++;
++				continue;
++			}
++			if (blob.size < f->min_size) {
++				printf("POLARIS REDWOOD: %s blob %u bytes implausible; skipped\n",
++				    f->path, blob.size);
++				continue;
++			}
++			bool same = false;
++			int error = rw_compare(f->path, &blob, &same);
++			if (!error && same) {
++				unchanged++;
++				continue;
++			}
++			if (error && error != ENOENT) {
++				printf("POLARIS REDWOOD: %s compare failed %d; skipped\n", f->path, error);
++				continue;
++			}
++			error = rw_write(f->path, &blob);
++			if (error) {
++				printf("POLARIS REDWOOD: %s write failed %d\n", f->path, error);
++				continue;
++			}
++			written++;
++			printf("POLARIS REDWOOD: installed %s (%u bytes, verified)\n",
++			    f->path, blob.size);
++		}
++		printf("POLARIS REDWOOD: install summary %u written, %u unchanged, %u absent\n",
++		    written, unchanged, absent);
++	}
++	if (inject == 1) {
++		extern void exec_inject_set(const char *);
++		struct rw_blob conf;
++		char text[512];
++		if (rw_blob_get("RedwoodInject", &conf) && conf.size < sizeof(text)) {
++			memcpy(text, conf.bytes, conf.size);
++			text[conf.size] = 0;
++		} else {
++			strlcpy(text, RW_INJECT_DEFAULT, sizeof(text));
++		}
++		vnode_t vp = NULLVP;
++		bool lib_there = vnode_open("/redwood/lib/libredwood.dylib",
++		    FREAD | O_NOFOLLOW, 0, 0, &vp, ctx) == 0;
++		if (lib_there) {
++			vnode_close(vp, FREAD, ctx);
++		}
++		if (!lib_there) {
++			printf("POLARIS REDWOOD: libredwood.dylib not on the root; inject conf NOT seeded\n");
++		} else {
++			exec_inject_set(text);
++			printf("POLARIS REDWOOD: exec_inject seeded: %s\n", text);
++		}
++	}
++}
++#endif
 diff --git a/bsd/sys/redwood_input.h b/bsd/sys/redwood_input.h
 new file mode 100644
 --- /dev/null
