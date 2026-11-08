@@ -28,6 +28,148 @@
  	sweet_usb_probe();
  	return 0;
  }
+@@ -746,53 +748,88 @@
+ 	uint64_t total, seq;
+ };
+ 
++static uint64_t sweet_log_flushed, sweet_log_seq;
++static int sweet_log_live, sweet_log_busy;
++
++static int
++sweet_log_flush_locked(void)
++{
++	uint64_t base = su.first_block + su.nblocks - SWEET_LOG_BLOCKS;
++	void *bounce = (void *)(su.dma + DMA_BOUNCE);
++	uint64_t total = os_atomic_load(&sweet_log_total, relaxed);
++	int error = 0;
++
++	uint64_t pos = total - sweet_log_flushed >= SWEET_LOG_SIZE ? total - SWEET_LOG_SIZE : sweet_log_flushed;
++	while (pos < total && !error) {
++		uint32_t off = (uint32_t)(pos % SWEET_LOG_SIZE);
++		uint32_t blk = off / UFS_BLOCK;
++		uint64_t need = ((uint64_t)off % UFS_BLOCK + (total - pos) + UFS_BLOCK - 1) / UFS_BLOCK;
++		uint32_t n = (uint32_t)MIN(MIN(need, (uint64_t)(SWEET_LOG_SIZE / UFS_BLOCK - blk)),
++		    (uint64_t)(BOUNCE_SIZE / UFS_BLOCK));
++		memcpy(bounce, sweet_log_ring + (uint64_t)blk * UFS_BLOCK, n * UFS_BLOCK);
++		error = ufs_write_blocks(base + 1 + blk, n);
++		pos += (uint64_t)(blk + n) * UFS_BLOCK - off;
++	}
++	if (!error) {
++		struct sweet_log_header h = {
++			.magic = { 'S', 'W', 'E', 'E', 'T', 'L', 'O', 'G' },
++			.version = 1, .size = SWEET_LOG_SIZE, .total = total, .seq = ++sweet_log_seq,
++		};
++		bzero(bounce, UFS_BLOCK);
++		memcpy(bounce, &h, sizeof(h));
++		error = ufs_write_blocks(base, 1);
++	}
++	if (!error) {
++		error = ufs_sync_cache();
++	}
++	if (error) {
++		sweet_log_live = 0;
++		printf("SWEET LOG: write failed (%d), stopping\n", error);
++		return error;
++	}
++	sweet_log_flushed = total;
++	return 0;
++}
++
++/* Commit the console ring to its disk window right now, in the caller's
++ * context. Safe to call once sweet_log_start() armed it; used by checkpoints
++ * that want their console output on disk even if the machine dies immediately
++ * afterwards, and by the panic console path (ufs_scsi polls when interrupts
++ * are off, so the flush works from the panic context too -- best effort:
++ * a contended lock or a nested call is simply skipped). */
++void sweet_log_sync(void);
++
++extern unsigned panic_active(void);
++
++void
++sweet_log_sync(void)
++{
++	if (!sweet_log_live || sweet_log_busy) {
++		return;
++	}
++	sweet_log_busy = 1;
++	if (panic_active()) {
++		if (lck_mtx_try_lock(&sweet_ufs_lock)) {
++			(void)sweet_log_flush_locked();
++			lck_mtx_unlock(&sweet_ufs_lock);
++		}
++	} else {
++		lck_mtx_lock(&sweet_ufs_lock);
++		(void)sweet_log_flush_locked();
++		lck_mtx_unlock(&sweet_ufs_lock);
++	}
++	sweet_log_busy = 0;
++}
++
+ static void
+ sweet_log_thread(__unused void *arg, __unused wait_result_t wr)
+ {
+-	uint64_t base = su.first_block + su.nblocks - SWEET_LOG_BLOCKS;
+-	uint64_t flushed = 0, seq = 0;
+-	void *bounce = (void *)(su.dma + DMA_BOUNCE);
+-
+-	printf("SWEET LOG: console log to the last %u KiB of the partition (block 0x%llx)\n",
+-	    SWEET_LOG_BLOCKS * UFS_BLOCK >> 10, base);
+ 	for (;;) {
+ 		(void)tsleep(&sweet_log_chan, PZERO, "sweetlog", hz * (int)sweet_log_secs);
+-		uint64_t total = os_atomic_load(&sweet_log_total, relaxed);
+-		if (total == flushed) {
+-			continue;
+-		}
+-		uint64_t pos = total - flushed >= SWEET_LOG_SIZE ? total - SWEET_LOG_SIZE : flushed;
+-		int error = 0;
+-
+-		lck_mtx_lock(&sweet_ufs_lock);
+-		while (pos < total && !error) {
+-			uint32_t off = (uint32_t)(pos % SWEET_LOG_SIZE);
+-			uint32_t blk = off / UFS_BLOCK;
+-			uint64_t need = ((uint64_t)off % UFS_BLOCK + (total - pos) + UFS_BLOCK - 1) / UFS_BLOCK;
+-			uint32_t n = (uint32_t)MIN(MIN(need, (uint64_t)(SWEET_LOG_SIZE / UFS_BLOCK - blk)),
+-			    (uint64_t)(BOUNCE_SIZE / UFS_BLOCK));
+-			memcpy(bounce, sweet_log_ring + (uint64_t)blk * UFS_BLOCK, n * UFS_BLOCK);
+-			error = ufs_write_blocks(base + 1 + blk, n);
+-			pos += (uint64_t)(blk + n) * UFS_BLOCK - off;
+-		}
+-		if (!error) {
+-			struct sweet_log_header h = {
+-				.magic = { 'S', 'W', 'E', 'E', 'T', 'L', 'O', 'G' },
+-				.version = 1, .size = SWEET_LOG_SIZE, .total = total, .seq = ++seq,
+-			};
+-			bzero(bounce, UFS_BLOCK);
+-			memcpy(bounce, &h, sizeof(h));
+-			error = ufs_write_blocks(base, 1);
+-		}
+-		if (!error) {
+-			error = ufs_sync_cache();
+-		}
+-		lck_mtx_unlock(&sweet_ufs_lock);
+-		if (error) {
+-			printf("SWEET LOG: write failed (%d), stopping\n", error);
++		sweet_log_sync();
++		if (!sweet_log_live) {
+ 			return;
+ 		}
+-		flushed = total;
+ 	}
+ }
+ 
+@@ -810,6 +847,12 @@
+ 	if (sweet_log_secs == 0 || sweet_log_secs > 60) {
+ 		sweet_log_secs = SWEET_LOG_SECS;
+ 	}
++	printf("SWEET LOG: console log to the last %u KiB of the partition (block 0x%llx)\n",
++	    SWEET_LOG_BLOCKS * UFS_BLOCK >> 10,
++	    su.first_block + su.nblocks - SWEET_LOG_BLOCKS);
++	/* Arm sweet_log_sync() whether or not the thread comes up (kernel_thread_start
++	 * has been seen to silently never run on this platform). */
++	sweet_log_live = 1;
+ 	if (kernel_thread_start(sweet_log_thread, NULL, &thread) == KERN_SUCCESS) {
+ 		thread_deallocate(thread);
+ 	}
 --- a/iokit/conf/files.arm64
 +++ b/iokit/conf/files.arm64
 @@ -15,6 +15,9 @@
@@ -57,6 +199,22 @@
  
  __startup_data static struct mach_vm_range io_range;
  static SECURITY_READ_ONLY_LATE(vm_map_t) io_submap;
+--- a/osfmk/console/serial_console.c
++++ b/osfmk/console/serial_console.c
+@@ -283,6 +283,13 @@
+ 
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ 	sweet_log_append(c, size);
++	if (panic_active()) {
++		/* The panic text is in the ring; try to land it on disk right now.
++		 * ufs_scsi degrades to pure polling with interrupts off, and the
++		 * flush skips itself if the log lock is contended. */
++		extern void sweet_log_sync(void);
++		sweet_log_sync();
++	}
+ 	if (sweet_console_muted && !panic_active()) {
+ 		return;
+ 	}
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
 @@ -124,6 +124,10 @@
@@ -380,7 +538,7 @@ diff --git a/bsd/dev/mi8_adreno.c b/bsd/dev/mi8_adreno.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/mi8_adreno.c
-@@ -0,0 +1,4956 @@
+@@ -0,0 +1,4964 @@
 +/*
 + * The GPU of the Xiaomi Mi 8 (dipper, SDM845): an Adreno 630 (chip id 0x06030001, "qcom,chipid" of the phone's
 + * own device tree), woken step by step. Only with boot-arg mi8gpu=N, which performs steps 1 to N and stops.
@@ -1658,6 +1816,7 @@ new file mode 100644
 +	}
 +	polaris_gpu_checkpoint("g3d: regions alloc");
 +	memcpy((void *)g3d_regions[0].memory, fw + G3D_SQE_FILE_SKIP, fw_size - G3D_SQE_FILE_SKIP);
++	polaris_gpu_checkpoint("g3d: sqe copied");
 +	l1 = (uint64_t *)g3d_tables;
 +	l2 = (uint64_t *)(g3d_tables + 0x1000);
 +	root = kvtophys((vm_offset_t)l1);
@@ -4483,12 +4642,16 @@ new file mode 100644
 +					/* GX is on now: the 3D core's context bank is safe to program. Doing this
 +					 * at step 12 hung the probe thread (EXP polaris: a CB1 access before the
 +					 * GMU powers GX never returns). */
++					polaris_gpu_checkpoint("g3d: calling setup");
 +					if (!g3d_smmu_setup()) {
 +						printf("mi8gpu: the 3D core's address space failed; the CP will not run\n");
 +					}
++					polaris_gpu_checkpoint("g3d: setup returned");
 +				}
 +				if (gpu_set && gmu_last_step >= 20) {
++					polaris_gpu_checkpoint("cp: start entered");
 +					gpu_cp_start();
++					polaris_gpu_checkpoint("cp: start returned");
 +				}
 +				if (gpu_set && gmu_last_step >= 21) {
 +					gpu_zap_and_command();
@@ -4711,12 +4874,15 @@ new file mode 100644
 +/* Diagnostic pauses use the scheduler so the UFS log thread can persist the
 + * checkpoint before a possibly blocking MMIO access. Default adds no pause.
 + */
++extern void sweet_log_sync(void);
++
 +static void
 +polaris_gpu_checkpoint(const char *where)
 +{
 +    static int channel;
 +    uint32_t ms = 0;
 +    printf("mi8gpu: checkpoint %s\n", where);
++    sweet_log_sync();
 +    if (PE_parse_boot_argn("mi8gpu_trace_ms", &ms, sizeof(ms)) && ms) {
 +        if (ms > 3000) ms = 3000;
 +        (void)tsleep(&channel, PZERO, "gpuchk", MAX(1, (int)((ms * hz + 999) / 1000)));
@@ -10046,7 +10212,7 @@ diff --git a/bsd/dev/polaris_dipper_compat.c b/bsd/dev/polaris_dipper_compat.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/polaris_dipper_compat.c
-@@ -0,0 +1,111 @@
+@@ -0,0 +1,113 @@
 +/* Small Polaris adapters for the Dipper A630 path; no APFS/UEFI dependency. */
 +#if defined(ARM64_BOARD_CONFIG_SWEET)
 +#include <sys/param.h>
@@ -10110,6 +10276,7 @@ new file mode 100644
 +		if (!va) {
 +			return NULL;
 +		}
++		printf("POLARIS GPU: %s iomap %#lx -> kmem copy\n", polaris_gpu_files[i].file, (unsigned long)va);
 +		/* The mapping is device memory: memcpy() of it faults (unaligned/vector reads are not
 +		 * supported there -- EXP polaris: "Unaligned kernel data abort" inside memcpy at
 +		 * fw+4). Hand out a normal copy instead; single word reads work on either side. */
@@ -10123,6 +10290,7 @@ new file mode 100644
 +		for (uint64_t i = bytes & ~3ull; i < bytes; i++) {
 +			((uint8_t *)copy)[i] = ((const uint8_t *)va)[i];
 +		}
++		printf("POLARIS GPU: %s copied to %#lx\n", polaris_gpu_files[i].file, (unsigned long)copy);
 +		*size = bytes;
 +		return (const uint8_t *)copy;
 +	}

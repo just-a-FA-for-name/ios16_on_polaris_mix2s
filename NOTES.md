@@ -1,4 +1,26 @@
-﻿## CURRENT 2026-11-07 ~21:55 ROOT CAUSE CONFIRMED BY PANIC PHOTO: memcpy of io-mapped firmware
+﻿## CURRENT 2026-11-08 ~12:00 kernel K ALSO panics (user report, ring stale) -> snapshot L = definitive localization
+### Kernel K real-device result (2026-11-08 morning)
+- Booted `C:\MIX2S-rescue\work2\shim-polaris-xnu-k2.img` (ORIGINAL historical shim slot + kernel K payload, sha-verified `0d641cf1`) with `mi8gpu=20 mi8gpu_cxhold=1 mi8gpu_rbsec=200`.
+- User: same panic screen (Unaligned kernel data abort). Device returned to fastboot, TWRP pulled the ring: **byte-identical stale (168016 B, flush #56, old boot-args)** -- kernel K wrote ZERO bytes, panic again precedes/during the log window.
+- Verified the running kernel IS the fix: patch 0102 contains the kmem-copy, RELEASE run `42380270118` built it, payload sha matches. Only ONE `redwood_wifi_file` definition exists and all 3 fw call sites (gmu/sqe/zap) use it. So the fault is NOT the sqe memcpy anymore -- it is somewhere else reached after `a630_sqe.fw` prints, OR identical-looking but different site.
+- Exhaustive iomap-access audit of the active path (mi8_adreno.c + polaris_dipper_compat.c): every `ml_io_map` consumer uses `rd`/`wr`/word reads; the only remaining `memcpy` sites touching possible iomap data (dsi cmd, cmddb entry dump, membench) are behind other boot-args, not in the step-20 path.
+
+### Snapshot L `4d73f96` = ring-commit instrumentation (dev build 42444373246 in progress)
+1. `sweet_log_sync(void)` exported from sweet_ufs.c: synchronous ring->UFS commit, shares `sweet_log_flushed`/`seq` with the log thread under `sweet_ufs_lock`; early-returns before `sweet_log_live`.
+2. `polaris_gpu_checkpoint()` now calls `sweet_log_sync()` after each printf -- every checkpoint lands on disk even if the machine panics a millisecond later (once root is mounted).
+3. New checkpoints: inside `redwood_wifi_file` (`POLARIS GPU: <file> iomap %#lx -> kmem copy` + `copied to %#lx`), `g3d: sqe copied` after the memcpy, `g3d: calling setup` / `g3d: setup returned` / `cp: start entered` / `cp: start returned` in `gmu_run`.
+4. Interpretation table for the next boot's last visible line:
+   - `g3d: calling setup` -> inside g3d_smmu_setup, read ring for finer granularity
+   - `checkpoint g3d: entry, before fw lookup` -> inside redwood_wifi_file (my new code path)
+   - `<file> iomap ... -> kmem copy` without `copied to` -> the u32 copy loop faulted (ml_io_map attrs?)
+   - `g3d: idle check done` + last line `a630_sqe.fw: ...` -> kmem_alloc tables faulted
+   - `g3d: tables alloc` -> kmem_alloc_contig regions
+   - `g3d: regions alloc` -> the sqe memcpy STILL faulted (would mean fw is not kmem -- impossible by source, would prove wrong kernel)
+   - `g3d: sqe copied`/`ATOS done` -> g3d fine, fault in gpu_cp_start (`cp: start entered` without `returned`)
+   - `cp: start returned` -> fault AFTER cp_start (zap/step21 or later code)
+- F-drive recovered (USB link failure, not media): full workspace readable again. `C:\MIX2S-rescue` remains a fallback mirror (firmware/ADT/tools/payload rebuilt there yesterday).
+- `gh` CLI missing post-incident; CI watched via `C:\MIX2S-rescue\ci_watch.py` (git-credential token + REST).
+## CURRENT 2026-11-07 ~21:55 ROOT CAUSE CONFIRMED BY PANIC PHOTO: memcpy of io-mapped firmware
 ### The actual bug (user-photographed panic screen, kernel H `0d4e79b7`)
 - Panic: `panic(cpu 2 caller ...): Unaligned kernel data abort`, PC inside **`_memcpy`** (symbolized via mach-o symtab: `_memcpy` file-VMA `0xfffffe00079ac4b0` matches the panic PC tail `079ac4b0`), FAR = an iomap VA `0xffffffe0ffe5xxxx` ending in `...004`.
 - Last console line before the dump: `mi8gpu: a630_sqe.fw: 32136 bytes` — the crash is `g3d_smmu_setup()`'s `memcpy(dst, fw + 4, 32132)`: `redwood_wifi_file()` returns **`ml_io_map` DEVICE memory**, and bulk/vector reads on device memory fault (only aligned single-register accesses allowed). The `a630_gmu.bin` path survived because it copies word-by-word.
