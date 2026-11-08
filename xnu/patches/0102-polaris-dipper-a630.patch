@@ -224,10 +224,10 @@
  	lock_trace = 1;
 --- a/bsd/kern/kern_exec.c
 +++ b/bsd/kern/kern_exec.c
-@@ -5574,8 +5574,86 @@
+@@ -5572,10 +5572,88 @@
+  * Note:	The argument and environment vectors are user space pointers
+  *		to arrays of user space pointers.
   */
- __attribute__((noinline))
- static int
 +/*
 + * Bring-up aid: the sysctl kern.exec_inject holds "LIBRARY NAME NAME ..."; every program
 + * whose file name is one of the NAMEs is started with DYLD_INSERT_LIBRARIES=LIBRARY in its
@@ -305,6 +305,8 @@
 +	return any;
 +}
 +
+ __attribute__((noinline))
+ static int
  exec_extract_strings(struct image_params *imgp)
  {
 +	char            inject_env[512];
@@ -10589,7 +10591,7 @@ diff --git a/bsd/dev/polaris_redwood_install.c b/bsd/dev/polaris_redwood_install
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/polaris_redwood_install.c
-@@ -0,0 +1,284 @@
+@@ -0,0 +1,286 @@
 +/* Board-gated VFS installer for the redwood user space that the dipper
 + * userland bring-up expects at /redwood: the inject library, the OpenGL ES
 + * bridge and Mesa behind it. Default is off. Files are supplied in reserved
@@ -10616,8 +10618,10 @@ new file mode 100644
 +#include <sys/uio.h>
 +#include <sys/namei.h>
 +#include <sys/vnode.h>
++#include <sys/vnode_if.h>
 +#include <sys/vnode_internal.h>
 +#include <kern/kalloc.h>
++#include <libkern/libkern.h>
 +#include <machine/machine_routines.h>
 +#include <pexpert/pexpert.h>
 +#include <pexpert/device_tree.h>
@@ -10708,20 +10712,20 @@ new file mode 100644
 +	}
 +	if (nd.ni_vp != NULLVP) {
 +		int isdir = vnode_isdir(nd.ni_vp);
++		nameidone(&nd);
 +		vnode_put(nd.ni_vp);
 +		vnode_put(nd.ni_dvp);
-+		nameidone(&nd);
 +		return isdir ? 0 : ENOTDIR;
 +	}
 +	VATTR_INIT(&va);
 +	VATTR_SET(&va, va_mode, 0755);
 +	VATTR_SET(&va, va_type, VDIR);
 +	error = VNOP_MKDIR(nd.ni_dvp, &nd.ni_vp, &nd.ni_cnd, &va, ctx);
++	nameidone(&nd);
 +	if (nd.ni_vp != NULLVP) {
 +		vnode_put(nd.ni_vp);
 +	}
 +	vnode_put(nd.ni_dvp);
-+	nameidone(&nd);
 +	return error;
 +}
 +
