@@ -1,4 +1,18 @@
-﻿## CURRENT 2026-11-08 ~18:0x SNAPSHOT R pushed (polaris-ci `31f60e84`, local `c546599`) -- CI run 42466374285 building
+﻿## CURRENT 2026-11-08 ~18:4x ROOT CAUSE of silent injection found -- dyld needs MAC policy "AMFI" (S2 `bec5f673` building)
+
+### Boot 089 result (kernel R `7c2f3a8b`, image shim-R, gpu=1+Redwood+InputOn)
+- Kernel side ALL WORKED: `RedwoodGPU: service registered; GPU is kept for user space`; 4 blobs installed+verified (`POLARIS REDWOOD: installed ...` x4, `4 written, 1 absent`=libredwood-sb); `exec_inject seeded: /redwood/lib/libredwood.dylib backboardd` BEFORE launchd.
+- `IOAcceleratorES -> 1 found` (was `0 found` before sweetfb publish) -- MiniIOPublishAccelerator works. New line: `IOAcceleratorES: thermalmonitord asks to set properties on it; boot-arg metal=1 was not given` = property gate closed without metal=1 (expected).
+- BUT: zero RedwoodGPU user-client activity, zero `redwood:` say() lines, backboardd exec'd once, still laggy => **the injected library never loaded**.
+
+### Root cause (dipper kern_minimac.c vs our sweet_amfi.c)
+- dyld calls `__mac_syscall("AMFI", 0x5a, {in,out})` = "check dyld policy" per exec. dipper's `miniamfi_policy_syscall` answers `0xff` (ALLOW_ALL: @paths, DYLD_* vars, inserted libs, interposing). Call 0x60 (bootarg state) gets 0x86 (not enforcing) -- also feeds ExtensionKit/pkd.
+- Our policy was named "SWEET AMFI" with NO `mpo_policy_syscall` -> `__mac_syscall("AMFI")` = ENOPOLICY -> dyld silently prunes `DYLD_INSERT_LIBRARIES` (and all DYLD_* env). Kernel delivered the var; dyld deleted it before the process saw it. Explains everything.
+- Fix in snapshot S2 (`0594c04` local): `sweet_amfi.c` gets `mpo_policy_syscall` porting `miniamfi_policy_syscall` verbatim (0x5a->0xff, 0x60->0x86, else ENOPOLICY); policy renamed "SWEET AMFI"->"AMFI" so __mac_syscall resolves it.
+- Also in S2: diagnostic `exec_inject:` printf at end of exec_inject_env logs each exec'd nameptr + matched env (one boot only; remove after verification).
+- Evidence chain for next boot: `exec_inject: backboardd DYLD_INSERT_LIBRARIES=...` -> `IOK backboardd: matching ... RedwoodGPU` -> `RedwoodGPU: buffers/submissions` + `redwood: the server has an accelerated renderer` (say->fd2 may not reach ring; IOKit matching is the reliable witness).
+
+## ARCHIVE SNAPSHOT R pushed (polaris-ci `31f60e84`, local `c546599`) -- CI run 42466374285 BUILD OK, kernel R tested (boot 089 above)
 
 ### Q CI failure cause + R fixes
 - Q rerun got past KDK and ~11 min into xnu build, then failed on MY code: `kern_exec.c:5587: error: cannot combine with previous 'int' declaration specifier` + `:5641: type specifier missing`. The inject block was inserted between `__attribute__((noinline)) static int` and `exec_extract_strings`, orphaning the `static int`. Fixed: noinline+static int moved back onto exec_extract_strings.
