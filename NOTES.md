@@ -1,4 +1,88 @@
-﻿## CURRENT 2026-11-08 ~12:00 kernel K ALSO panics (user report, ring stale) -> snapshot L = definitive localization
+﻿## CURRENT 2026-11-08 ~16:20 STEP 20 FULL PASS ON HARDWARE -- CP consumed a real ring buffer; rb fired but PSCI reset lands HyperOS (cookie ignored)
+### Boot 085P result (kernel P `244eed0b`, image work7, booted ~15:56)
+- **IMEM fix VERIFIED**: `rb cookie read-before 0x882362d4` -> `store` -> `readback 0x77665500`, `reboot arm: 200 s`. The dipper address 0x146aa65c bus-stalled the CPU; polaris restart_reason = **0x146bf65c** (stock DTB `qcom,msm-imem@146bf000` + `restart_reason@65c`). `mi8gpu_imem=<pa>` overrides.
+- **Ring persistence verified again**: flush #418, 278907 B.
+- **ALL 20 GPU STEPS DONE on hardware**: GMU `FW_INIT_RESULT 0xbabeface`, gfx rail + SPTPRAC on, HFI complete (FW 0x10070000, PERF table 257-710 MHz), GPU_SET ack, 3D regs live, hw_init tables written (few write-once diffs = normal).
+- **g3d**: SQE kmem copy OK (32136 B, words `00000000 016ee19a ...`), mapped at GPU-VA 0x10000000; context bank 1 written (TTBR0 0x00010001bb9ac000); ATOS verified 2388 pages, 0 wrong; expected-fault probes correctly refused.
+- **CP EXECUTED OUR RING**: `ring: 9 words, first 0x70c80008 ...` -> `CP_RB_WPTR <- 9` -> `CP CONSUMED the ring: RB_RPTR 9 WPTR 9, RBBM_STATUS idle`. Real command-processor execution through the SMMU.
+- Clean teardown: slumber, GMU re-held, RSC/PDC restored, SMMU put back, `over (mi8gpu=20)`. SpringBoard rendered the whole time.
+- **rb fired at +200 s** (`checkpoint reboot: timer expired`) -> PSCI SYSTEM_RESET -> phone landed in **HyperOS, NOT fastboot**: IMEM cookie 0x77665500 is ignored by polaris ABL (flame NOTES confirm same on flame: "bootreason=bootloader seen but ABL boots Android"). Stock kernel has NO 0x776655xx constants -> polaris honors **PMIC PON SOFT_RB_SPARE (sid0 periph0x800+0x8f)** like downstream; current kernel SPMI is observer-read-only; a write lane (chnls@0xc600000) is needed later. Workaround meanwhile: user re-enters fastboot manually.
+- bluetoothd/fairplayd.H2 crash-loop persists (no BT hw) -- contributes to slow boot feel.
+
+### Boots 086/087 (same kernel P, cmdline `mi8gpu=21` / `mi8gpu=22`)
+- **Step 21 PASS**: zap mdt+b02 kmem-copied, written to reserved region (0 words wrong), `PAS_AUTH_AND_RESET rc 0 -- ZAP AUTHENTICATED`, `CP_SET_SECURE_MODE(0)` consumed (RPTR=WPTR=11), `SECVID_TRUST_CNTL = 0 NON-SECURE`, GPU idle. SCM pre-checks said PAS_SUPPORTED=0 but the actual auth call worked.
+- **Step 22 PASS**: full second GMU/3D-core power-up cycle incl. hw_init tables (few write-once/RO readback diffs as before), GX vote, GMU firmware re-run, then clean stop. `PAS_SHUTDOWN(13) rc 0`. Minor: `SMMU restoration FAIL -- retaining memory` (write/readback mismatch on restore; only affects teardown cleanliness).
+- rb fired again -> HyperOS (expected, cookie ignored). Ring healthy both rounds.
+- **Hardware-side bring-up now saturated**: GMU fw + HFI + SMMU + SQE + zap auth + non-secure CP ring execution all verified on polaris. Remaining gap to "feels fast": userspace still CPU-composites 2.74 MP/frame (gpu=0; present ~13 ms each) and bluetoothd/fairplayd.H2 crash-loop.
+- **UX test image built** (same kernel, `sweettouch=1 sweetkeys=1 ... mi8gpu=22 mi8gpu_rbsec=0`, `-InputOn` switch added to build_image.ps1): first real input validation.
+### Boot 088P gpu=1+metal=1 (kernel P, `gpu=1 metal=1 ... rbsec=0`, InputOn)
+- System booted to UI; touch works (sweettouch=1 path OK). Still CPU-rendered = expected (no userspace GPU client yet).
+- **Kernel gpu=1 chain verified**: steps 1-21 ran synchronously in mi8_adreno_init, ZAP AUTHENTICATED, SECVID_TRUST_CNTL=0 (non-secure), no teardown lines -> GPU stayed on. RedwoodGPUStart runs silently (no IOLog) -- registration unverifiable from log alone; add a printf next kernel.
+- **IOAcceleratorES stub NOT published**: `-> 0 found` on every backboardd match. Cause: the stub only exists in `MiniIOMobileFramebuffer.cpp::publishAccelerator`, called from `MiniIOMobileFramebufferStart` -- but this build runs **SweetFramebuffer**, which has no accelerator publish at all. Port it into the sweetfb start path.
+
+### ARCHITECTURE FINDING -- why polaris "卡飞" vs dipper "流畅" (the real gap)
+- backboardd polls IOAcceleratorES 20+/boot, 0 found -> every frame = CPU software raster of 2.74 MP. Software compositing IS the lag; not VM (fastboot boot runs bare metal at 2649 MHz, DDR vote on).
+- Dipper's usable path = **second payload ramdisk `root.apfs` mounted at /redwood**: contains sbin/init + rc.jobs (com.redwood.demo LaunchDaemon), libredwood-gl + libOSMesa + libredwoodair + libredwood-sb inject libs. Kernel `kern.exec_inject` sysctl hands inject.conf to exec path -> libs inside SpringBoard/backboardd -> inject.c `opengl_es()` loads libredwood-gl -> **CoreAnimation OpenGL ES renderer runs on the GPU**. Metal plugin is a SEPARATE later path (redwoodmetal.m 275 KB source, unbuilt) -- compositor accel does NOT need it.
+- Polaris gaps (ordered): (1) `kern.exec_inject` sysctl missing in our tree -- port from `out/research-hackios-kernel/xnu/redwood.patch`; (2) /redwood ramdisk never shipped -- `pmdN=` boot-arg parsing exists (memdev.c), mkpayload `--blob` can carry the apfs + cmdline `pmd1=<pa>.<size>`; (3) com.redwood.demo.plist needs installing into rootfs LaunchDaemons (VFS installer pattern from polaris_preview_install.c); (4) whoever mounts md1 at /redwood -- check dipper init/rc.launchd.
+- Userland artifacts built & verified (dipper-userland-20261106): libredwood-gl.dylib 350 KB, libredwoodair 9.4 MB, libOSMesa 15 MB, gl_test, air_run. **libredwoodmetal NOT built.** WSL toolchain: wifi-port/build_dipper_mesa.sh + build_dipper_eagl.sh (THEOS=/opt/polaris-dipper-theos, /opt/polaris-dipper-userland).
+- rc.ios minimal-boot env + rc.jobs.metal* test suite exist for staged validation.
+### Next
+- Kernel P step-21 image ready: `C:\MIX2S-rescue\work8\shim-polaris-xnu-p-s21.img` (same kernel P sha 244eed0b, cmdline `mi8gpu=21 mi8gpu_rbsec=220` via new `-Step`/`-RbSec` params on build_image.ps1).
+- Step 21 = ZAP authentication + secure-mode exit + first real command; then 22 = CP framebuffer paint.
+## CURRENT 2026-11-08 ~15:30 ring WORKS (flush #639) -- probe ran, armed rb, then vanished inside mi8_rb_arm; snapshot O isolates it
+### Boot 084N result (kernel N `0158f798`, booted ~15:01)
+- **Ring persistence SOLVED**: pull `boot-084N-s20` shows `total 193890, flush #639` -- the bsd_timeout log callout flushed every second for ~10.6 min. sweet_log_write path confirmed good.
+- **Probe thread RAN this time** (no watchdog retries): printed `rbsec=200 parsed`, `rb imem ml_io_map page=0xfffffe8ff488a000 cookie=1` -- then VANISHED before `reboot arm`/`waiting 20 s`. Narrowed to: IMEM cookie store, PE_halt_restart assign, or bsd_timeout -- most likely the IMEM store bus-stalling one CPU (no exception, no timeout; system kept running = other 7 CPUs fine).
+- rb consequently NEVER armed -> no auto-reset (expected).
+- Userspace reached daemon stage but `bluetoothd` + `fairplayd.H2` crash-loop forever (no BT hardware); likely a big part of the "10 min progress bar". Boot itself was functional, just never finishing.
+- POLARIS TOUCH line: `SE14 clocks not confirmed; MMIO withheld` -- polaris touch driver refused MMIO; combined with `sweettouch=0` that's the dead touch. `POLARIS KEYS: PM8998 polling started` -- key polling did start.
+- `SWEET KEYS/TOUCH: SM7150 not confirmed` -- the sweet HID paths decline on SDM845; polaris-specific drivers are the only input path.
+
+### Snapshot O `6f1701b` (RELEASE 42458062937)
+1. rb arm moved to a disposable `mi8_rb_thread` (kernel_thread_start; sync fallback) -- an IMEM store hang costs one CPU but the probe survives to do GPU steps.
+2. Instrumented the hang window: `rb cookie store begin` -> `rb cookie readback` -> `rb halt_restart armed; entering bsd_timeout` -> `reboot arm` -- identifies store vs callout.
+- Note: if kernel_thread_start flakes for the rb thread, rb silently stays unarmed (same as N); the probe watchdog still covers the probe itself.
+
+### State / pending
+- Pull naming: `boot-084N-s20` = boot#84, kernel N, step20. Ring decoder works; bin+txt under `C:\MIX2S-rescue\device-private\logs\`.
+- Kernel N image: `work6\shim-polaris-xnu-n.img` (verified).
+- Next: boot kernel O image, SAME args; expected log tells which call hung; if IMEM store hangs -> need TZ/SCM cookie path or PSCI-reset-without-cookie decision.
+## CURRENT 2026-11-08 ~14:00 kernel M reached iOS UI; ring still stale -- kernel_thread_start never scheduled; snapshot N replaces threads with callouts
+### Boot 083M result (kernel M `7a499052`, image work5, booted ~13:39)
+- **System reached the iOS UI** (user confirmed normal screen; touch/keys dead because cmdline keeps `sweettouch=0 sweetkeys=0` and polaris touch path is still unproven).
+- rbsec=200 did NOT reset the phone (still in iOS at ~+6 min) and the UFS ring stayed byte-identical to an old boot (cmdline tail `mi8gpu_cxhold=1`, no rbsec; bin hash equals 081K pull).
+- Conclusion: **the mi8gpu probe thread and the sweet log thread never ran this boot** -- both are `kernel_thread_start` children and that API randomly returns success without scheduling on this platform. With no probe thread there was no rb arm (explains no reset) and no checkpoint syncs; with no log thread there were no periodic flushes (explains the stale ring). Not a regression: pure scheduling luck.
+- The stale ring content itself is a real earlier boot (boot 067H-era): shows `checkpoint g3d: before fw lookup`, `unmapped 0x1000: explicit translation fault`, `context fault status 0x00000400`, `IOK backboardd matching IOAcceleratorES -> 0 found`, `SWEET PACE vsync ~16.68ms` -- i.e. an older kernel reached the g3d phase, hit SMMU translation faults, and userspace found no GPU service.
+
+### Snapshot N `8902a18` (dev+RELEASE pending)
+1. `sweet_log_start`: prints why it would disable; arms `sweet_log_live`; **immediate `sweet_log_sync()`** in the probe context (lands the header + early log on disk at once); **self-rescheduling `bsd_timeout` flush** every `ufslogsecs`; keeps the thread as an extra.
+2. `sweet_log_sync`: busy-skip now prints once ("sync skipped: another flush still holds the lock") so a stuck lock becomes visible.
+3. `mi8_adreno_init`: after `kernel_thread_start`, arms `bsd_timeout(mi8_probe_watch, last, +8s)`; the watchdog retries the thread start up to 6x/8s and logs each retry. The thread body gains a started-flag (`__sync_fetch_and_add`) so late duplicates self-terminate.
+- Purpose: make ring persistence independent of thread scheduling; next boot either produces a fresh ring (proving writes) or shows the busy/error print on screen.
+
+### State / pending
+- CI: snapshot N `8902a18`, dev run 42452549893 queued, RELEASE dispatched after it.
+- Kernel M artifacts kept: `C:\MIX2S-rescue\kernel-M.release.sweet` (sha 7a499052), image `work5\shim-polaris-xnu-m.img` (orig shim + payload, verified ramdisk==payload, kernel bytes at 0x468).
+- `C:\MIX2S-rescue\build_image.ps1` packs any kernel: mkpayload (ADT + cmdline + 4 GPU blobs) -> mkbootimg with shim-slot-orig.bin -> unpack verify. fastboot/adb live at `D:\adk\sdk\platform-tools\` (also `D:\AI workspace\android-tools\platform-tools\`).
+- Pull: `python C:\MIX2S-rescue\wifi-port\pull_ios_log.py --serial 7f9594af <name>` in TWRP (`fastboot boot D:\AI\ComfyUI\temp\twrp-polaris.img`).
+- Touch: this boot had `sweettouch=0 sweetkeys=0` so dead input is expected by config; polaris touch/HID still needs a dedicated bring-up round after GPU.
+- Next: boot kernel N image with same args -> TWRP pull -> expect NEW ring showing probe retries/g3d/CP checkpoints or a concrete failure.
+## CURRENT 2026-11-08 ~13:15 PANIC PHOTO DECODED -- rbsec phystokv kills every rbsec boot, snapshot M fixes
+### The photographed panic (kernel L, boot 082, user photo 2026-11-08 ~13:05)
+- Panic dump reads (zoomed): `panic(cpu 1 caller 0xfffffe000797f9c4): phystokv: Illegal PA: 0x146aa65c: phys base 0xb0000000, size 0x14cc00000 arm_vm_init.c:381` preceded by `mi8gpu: rbsec=200 parsed; arming callout reset`.
+- **`mi8gpu_rbsec` itself was the killer all along**: `mi8_rb_arm()` called `phystokv(0x146aa65c)` on the IMEM cookie; phystokv bounds-checks PAs against the DRAM physmap and PANICS on MMIO addresses. Every `mi8gpu_rbsec=` boot died at probe entry (~+5 s), before any g3d work, before rootdev on some boots.
+- This coexists with yesterday's confirmed memcpy panic (kernel H, no-rbsec round reached g3d). Two bugs, one screen shape.
+- Why ALL rings stayed stale on K/L: (1) log thread uses kernel_thread_start which randomly never runs on this platform; (2) the probe thread died at rb ARM before any polaris_gpu_checkpoint; (3) the panic dump does NOT go through _cnputs -- it uses paniclog_append_noflush -> consdebug_putc_unbuffered (osfmk/kern/printf.c), so the serial_console panic hook never fired.
+- Boot sequence evidence on the photo: UFS root mounted (ufsrw), journal replay ran, SWEET LOG armed, POLARIS TOUCH/I2C/KEYS + SWEET USB all initialized -- the panic display redraws the TOP of the screen over the live scrollback.
+
+### Snapshot M `d9bea12` (dev+RELEASE pending)
+1. `mi8_rb_arm`: IMEM mapped only via `ml_io_map` (phystokv attempt removed) -- rbsec arms without panic; `PE_halt_restart` and the bsd_timeout callout install as before.
+2. `consdebug_putc_unbuffered` (osfmk/kern/printf.c, added to patch modified-list): every panic char is appended to the sweet ring and `sweet_log_sync()` runs per line -- panic text lands on disk mid-dump whenever UFS was initialized (ufs_scsi polls with interrupts off).
+3. Carries snapshot L content: `sweet_log_sync` (try_lock + busy guard + live armed in sweet_log_start, not the thread), `polaris_gpu_checkpoint` sync, fwmap/g3d/cp checkpoints, kmem-copy firmware path.
+- Interpretation: with rbsec no longer panicking, a `mi8gpu=20` boot reaches the g3d/CP phase; any residual panic now writes itself to the ring via the paniclog hook.
+- Kernel L (unused now): run 42446240667 artifact sha `67ce5733`; image `C:\MIX2S-rescue\work4\shim-polaris-xnu.img` (orig shim + K-style packaging recipe captured in `C:\MIX2S-rescue\build_image.ps1`).
+- Phone: returned to fastboot after photo; TWRP pull `boot-082L-s20.txt` was stale as analyzed above.
+## CURRENT 2026-11-08 ~12:00 kernel K ALSO panics (user report, ring stale) -> snapshot L = definitive localization
 ### Kernel K real-device result (2026-11-08 morning)
 - Booted `C:\MIX2S-rescue\work2\shim-polaris-xnu-k2.img` (ORIGINAL historical shim slot + kernel K payload, sha-verified `0d641cf1`) with `mi8gpu=20 mi8gpu_cxhold=1 mi8gpu_rbsec=200`.
 - User: same panic screen (Unaligned kernel data abort). Device returned to fastboot, TWRP pulled the ring: **byte-identical stale (168016 B, flush #56, old boot-args)** -- kernel K wrote ZERO bytes, panic again precedes/during the log window.
