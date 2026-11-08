@@ -1,4 +1,21 @@
-﻿## CURRENT 2026-11-08 ~16:20 STEP 20 FULL PASS ON HARDWARE -- CP consumed a real ring buffer; rb fired but PSCI reset lands HyperOS (cookie ignored)
+﻿## CURRENT 2026-11-08 ~17:10 SNAPSHOT Q pushed -- exec_inject + IOAcceleratorES publish in sweetfb (CI 42464964411 building)
+
+### Boot 088 result recap (kernel P, `gpu=1 metal=1`)
+- UI reached, touch OK, still software-rendered (expected). Ring proved `gpu=1` chain ran (ZAP auth + non-secure, no teardown) and that backboardd still got `0 found` on IOAcceleratorES -- because this build runs **SweetFramebuffer**, and the stub only lived in MiniIOMobileFramebuffer.
+
+### Snapshot Q content (local commit `06c77b3`, polaris-ci commit `c1c006ab`)
+1. `bsd/kern/kern_exec.c` (now in patch modified-list): ported `kern.exec_inject` sysctl from `out/research-hackios-kernel/xnu/redwood.patch` -- `exec_inject_conf[512]` buffer + SYSCTL_STRING handler + post-envv injection loop appending `inject_env` entries. This is the kernel half that hands the inject list to new processes (dipper inject libs read it).
+2. `iokit/Kernel/MiniIOMobileFramebuffer.cpp`: added exported `extern "C" void MiniIOPublishAccelerator(IOService *provider)` -- reuses the existing compiled `IOAcceleratorES` class ("sgx" service), no duplicate definition (the class was already in the kernel, only never published from the sweetfb path).
+3. `iokit/Kernel/arm/SweetFramebuffer.cpp`: declares `MiniIOPublishAccelerator` and calls it after `registerService()` -- backboardd's IOAcceleratorES matching should now find the sgx service.
+4. `iokit/Kernel/RedwoodGPU.cpp`: added IOLog lines around service start/registration so `gpu=1` registration is verifiable in the ring.
+5. `wifi-port/build_dipper_gpu_patch.py`: `kern_exec.c` added to modified list. Patch regenerated = 726,329 B.
+- Push note: repo push to the CI fork used `git -c http.proxy=127.0.0.1:7890`; polaris-ci/main commit created via GitHub API (`C:\MIX2S-rescue\push_snapshot.py`, base_tree update of `xnu/patches/0102-*.patch`).
+
+### Next (validation of snapshot Q)
+- Wait for CI run 42464964411 -> download kernel Q -> pack `gpu=1 metal=1` + `-InputOn` image -> boot -> TWRP pull.
+- Expect in ring: `IOAcceleratorES` matching now reports the sgx service found (no more `0 found`); `RedwoodGPU` start log lines; `exec_inject` sysctl present (`kern.exec_inject`).
+- Then the /redwood userspace stack (second ramdisk with libredwood-gl etc.) is the remaining piece for real compositor acceleration -- kernel half is now landed.
+## CURRENT 2026-11-08 ~16:20 STEP 20 FULL PASS ON HARDWARE -- CP consumed a real ring buffer; rb fired but PSCI reset lands HyperOS (cookie ignored)
 ### Boot 085P result (kernel P `244eed0b`, image work7, booted ~15:56)
 - **IMEM fix VERIFIED**: `rb cookie read-before 0x882362d4` -> `store` -> `readback 0x77665500`, `reboot arm: 200 s`. The dipper address 0x146aa65c bus-stalled the CPU; polaris restart_reason = **0x146bf65c** (stock DTB `qcom,msm-imem@146bf000` + `restart_reason@65c`). `mi8gpu_imem=<pa>` overrides.
 - **Ring persistence verified again**: flush #418, 278907 B.
