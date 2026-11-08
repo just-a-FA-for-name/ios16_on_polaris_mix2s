@@ -224,7 +224,7 @@
  	lock_trace = 1;
 --- a/bsd/kern/kern_exec.c
 +++ b/bsd/kern/kern_exec.c
-@@ -5572,10 +5572,88 @@
+@@ -5572,10 +5572,90 @@
   * Note:	The argument and environment vectors are user space pointers
   *		to arrays of user space pointers.
   */
@@ -302,6 +302,8 @@
 +			any = true;
 +		}
 +	}
++	printf("exec_inject: %.*s %s\n", (int)namelen, name ? name : "?",
++	    any ? env : "no match");
 +	return any;
 +}
 +
@@ -313,7 +315,7 @@
  	int error = 0;
  	int     ptr_size = (imgp->ip_flags & IMGPF_WAS_64BIT_ADDR) ? 8 : 4;
  	int new_ptr_size = (imgp->ip_flags & IMGPF_IS_64BIT_ADDR) ? 8 : 4;
-@@ -5742,6 +5820,20 @@
+@@ -5742,6 +5822,20 @@
  			goto bad;
  		}
  		imgp->ip_argspace -= new_ptr_size; /* to hold envv[] entry */
