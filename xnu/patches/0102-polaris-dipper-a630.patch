@@ -1,6 +1,6 @@
 --- a/bsd/conf/files
 +++ b/bsd/conf/files
-@@ -118,6 +118,10 @@
+@@ -118,6 +118,10 @@ bsd/dev/polaris_gpu.c			standard
  bsd/dev/polaris_keys.c			standard
  bsd/dev/polaris_preview_install.c	standard
  bsd/dev/polaris_poster_maintenance.c	standard
@@ -13,7 +13,7 @@
  bsd/dev/unix_startup.c			standard
 --- a/bsd/dev/sweet_ufs.c
 +++ b/bsd/dev/sweet_ufs.c
-@@ -57,6 +57,7 @@
+@@ -57,6 +57,7 @@ extern void polaris_touch_i2c_init(void);
  extern void polaris_gpu_diag(void);
  extern void polaris_gpu_init(void);
  extern void polaris_keys_init(void);
@@ -21,7 +21,7 @@
  extern void sweet_usb_probe(void);
  
  #define REG_CAP         0x00
-@@ -669,6 +670,7 @@
+@@ -669,6 +670,7 @@ sweet_ufs_init(void)
  	polaris_gpu_diag();
  	polaris_gpu_init();
  	polaris_keys_init();
@@ -29,21 +29,34 @@
  	sweet_usb_probe();
  	return 0;
  }
-@@ -746,53 +748,110 @@
+@@ -746,53 +748,110 @@ struct sweet_log_header {
  	uint64_t total, seq;
  };
  
+-static void
+-sweet_log_thread(__unused void *arg, __unused wait_result_t wr)
 +static uint64_t sweet_log_flushed, sweet_log_seq;
 +static int sweet_log_live, sweet_log_busy;
 +
 +static int
 +sweet_log_flush_locked(void)
-+{
-+	uint64_t base = su.first_block + su.nblocks - SWEET_LOG_BLOCKS;
-+	void *bounce = (void *)(su.dma + DMA_BOUNCE);
+ {
+ 	uint64_t base = su.first_block + su.nblocks - SWEET_LOG_BLOCKS;
+-	uint64_t flushed = 0, seq = 0;
+ 	void *bounce = (void *)(su.dma + DMA_BOUNCE);
 +	uint64_t total = os_atomic_load(&sweet_log_total, relaxed);
 +	int error = 0;
-+
+ 
+-	printf("SWEET LOG: console log to the last %u KiB of the partition (block 0x%llx)\n",
+-	    SWEET_LOG_BLOCKS * UFS_BLOCK >> 10, base);
+-	for (;;) {
+-		(void)tsleep(&sweet_log_chan, PZERO, "sweetlog", hz * (int)sweet_log_secs);
+-		uint64_t total = os_atomic_load(&sweet_log_total, relaxed);
+-		if (total == flushed) {
+-			continue;
+-		}
+-		uint64_t pos = total - flushed >= SWEET_LOG_SIZE ? total - SWEET_LOG_SIZE : flushed;
+-		int error = 0;
 +	uint64_t pos = total - sweet_log_flushed >= SWEET_LOG_SIZE ? total - SWEET_LOG_SIZE : sweet_log_flushed;
 +	while (pos < total && !error) {
 +		uint32_t off = (uint32_t)(pos % SWEET_LOG_SIZE);
@@ -75,7 +88,26 @@
 +	sweet_log_flushed = total;
 +	return 0;
 +}
-+
+ 
+-		lck_mtx_lock(&sweet_ufs_lock);
+-		while (pos < total && !error) {
+-			uint32_t off = (uint32_t)(pos % SWEET_LOG_SIZE);
+-			uint32_t blk = off / UFS_BLOCK;
+-			uint64_t need = ((uint64_t)off % UFS_BLOCK + (total - pos) + UFS_BLOCK - 1) / UFS_BLOCK;
+-			uint32_t n = (uint32_t)MIN(MIN(need, (uint64_t)(SWEET_LOG_SIZE / UFS_BLOCK - blk)),
+-			    (uint64_t)(BOUNCE_SIZE / UFS_BLOCK));
+-			memcpy(bounce, sweet_log_ring + (uint64_t)blk * UFS_BLOCK, n * UFS_BLOCK);
+-			error = ufs_write_blocks(base + 1 + blk, n);
+-			pos += (uint64_t)(blk + n) * UFS_BLOCK - off;
+-		}
+-		if (!error) {
+-			struct sweet_log_header h = {
+-				.magic = { 'S', 'W', 'E', 'E', 'T', 'L', 'O', 'G' },
+-				.version = 1, .size = SWEET_LOG_SIZE, .total = total, .seq = ++seq,
+-			};
+-			bzero(bounce, UFS_BLOCK);
+-			memcpy(bounce, &h, sizeof(h));
+-			error = ufs_write_blocks(base, 1);
 +/* Commit the console ring to its disk window right now, in the caller's
 + * context. Safe to call once sweet_log_start() armed it; used by checkpoints
 + * that want their console output on disk even if the machine dies immediately
@@ -98,7 +130,9 @@
 +		if (!sweet_log_busy_reported) {
 +			sweet_log_busy_reported = 1;
 +			printf("SWEET LOG: sync skipped: another flush still holds the lock\n");
-+		}
+ 		}
+-		if (!error) {
+-			error = ufs_sync_cache();
 +		return;
 +	}
 +	sweet_log_busy = 1;
@@ -106,59 +140,22 @@
 +		if (lck_mtx_try_lock(&sweet_ufs_lock)) {
 +			(void)sweet_log_flush_locked();
 +			lck_mtx_unlock(&sweet_ufs_lock);
-+		}
+ 		}
 +	} else {
 +		lck_mtx_lock(&sweet_ufs_lock);
 +		(void)sweet_log_flush_locked();
-+		lck_mtx_unlock(&sweet_ufs_lock);
+ 		lck_mtx_unlock(&sweet_ufs_lock);
+-		if (error) {
+-			printf("SWEET LOG: write failed (%d), stopping\n", error);
 +	}
 +	sweet_log_busy = 0;
 +}
 +
- static void
- sweet_log_thread(__unused void *arg, __unused wait_result_t wr)
- {
--	uint64_t base = su.first_block + su.nblocks - SWEET_LOG_BLOCKS;
--	uint64_t flushed = 0, seq = 0;
--	void *bounce = (void *)(su.dma + DMA_BOUNCE);
--
--	printf("SWEET LOG: console log to the last %u KiB of the partition (block 0x%llx)\n",
--	    SWEET_LOG_BLOCKS * UFS_BLOCK >> 10, base);
- 	for (;;) {
- 		(void)tsleep(&sweet_log_chan, PZERO, "sweetlog", hz * (int)sweet_log_secs);
--		uint64_t total = os_atomic_load(&sweet_log_total, relaxed);
--		if (total == flushed) {
--			continue;
--		}
--		uint64_t pos = total - flushed >= SWEET_LOG_SIZE ? total - SWEET_LOG_SIZE : flushed;
--		int error = 0;
--
--		lck_mtx_lock(&sweet_ufs_lock);
--		while (pos < total && !error) {
--			uint32_t off = (uint32_t)(pos % SWEET_LOG_SIZE);
--			uint32_t blk = off / UFS_BLOCK;
--			uint64_t need = ((uint64_t)off % UFS_BLOCK + (total - pos) + UFS_BLOCK - 1) / UFS_BLOCK;
--			uint32_t n = (uint32_t)MIN(MIN(need, (uint64_t)(SWEET_LOG_SIZE / UFS_BLOCK - blk)),
--			    (uint64_t)(BOUNCE_SIZE / UFS_BLOCK));
--			memcpy(bounce, sweet_log_ring + (uint64_t)blk * UFS_BLOCK, n * UFS_BLOCK);
--			error = ufs_write_blocks(base + 1 + blk, n);
--			pos += (uint64_t)(blk + n) * UFS_BLOCK - off;
--		}
--		if (!error) {
--			struct sweet_log_header h = {
--				.magic = { 'S', 'W', 'E', 'E', 'T', 'L', 'O', 'G' },
--				.version = 1, .size = SWEET_LOG_SIZE, .total = total, .seq = ++seq,
--			};
--			bzero(bounce, UFS_BLOCK);
--			memcpy(bounce, &h, sizeof(h));
--			error = ufs_write_blocks(base, 1);
--		}
--		if (!error) {
--			error = ufs_sync_cache();
--		}
--		lck_mtx_unlock(&sweet_ufs_lock);
--		if (error) {
--			printf("SWEET LOG: write failed (%d), stopping\n", error);
++static void
++sweet_log_thread(__unused void *arg, __unused wait_result_t wr)
++{
++	for (;;) {
++		(void)tsleep(&sweet_log_chan, PZERO, "sweetlog", hz * (int)sweet_log_secs);
 +		sweet_log_sync();
 +		if (!sweet_log_live) {
  			return;
@@ -180,7 +177,7 @@
  	}
  }
  
-@@ -801,15 +860,30 @@
+@@ -801,15 +860,30 @@ sweet_log_start(void)
  {
  	uint32_t on = 1;
  	thread_t thread;
@@ -213,7 +210,7 @@
  	}
 --- a/bsd/kern/bsd_init.c
 +++ b/bsd/kern/bsd_init.c
-@@ -1105,6 +1105,8 @@
+@@ -1105,6 +1105,8 @@ bsdinit_task(void)
  	polaris_preview_install();
  	extern void polaris_poster_maintenance_install(void);
  	polaris_poster_maintenance_install();
@@ -224,7 +221,7 @@
  	lock_trace = 1;
 --- a/bsd/kern/kern_exec.c
 +++ b/bsd/kern/kern_exec.c
-@@ -5572,10 +5572,90 @@
+@@ -5572,10 +5572,90 @@ bad:
   * Note:	The argument and environment vectors are user space pointers
   *		to arrays of user space pointers.
   */
@@ -315,13 +312,10 @@
  	int error = 0;
  	int     ptr_size = (imgp->ip_flags & IMGPF_WAS_64BIT_ADDR) ? 8 : 4;
  	int new_ptr_size = (imgp->ip_flags & IMGPF_IS_64BIT_ADDR) ? 8 : 4;
-@@ -5742,6 +5822,20 @@
- 			goto bad;
- 		}
- 		imgp->ip_argspace -= new_ptr_size; /* to hold envv[] entry */
-+		imgp->ip_envc++;
-+	}
-+
+@@ -5745,6 +5825,20 @@ exec_extract_strings(struct image_params *imgp)
+ 		imgp->ip_envc++;
+ 	}
+ 
 +	/* one more variable for the programs that get our library inside them (see exec_inject_env) */
 +	if (exec_inject_env(imgp, inject_env, sizeof(inject_env))) {
 +		error = exec_add_user_string(imgp, CAST_USER_ADDR_T(inject_env), UIO_SYSSPACE, TRUE);
@@ -333,12 +327,15 @@
 +			goto bad;
 +		}
 +		imgp->ip_argspace -= new_ptr_size;
- 		imgp->ip_envc++;
- 	}
- 
++		imgp->ip_envc++;
++	}
++
+ 	/* Save space for envv[] NULL terminator */
+ 	if (imgp->ip_argspace < new_ptr_size) {
+ 		error = E2BIG;
 --- a/bsd/kern/sweet_amfi.c
 +++ b/bsd/kern/sweet_amfi.c
-@@ -305,8 +305,54 @@
+@@ -305,8 +305,54 @@ sweet_sandbox_syscall(struct proc *p, int call, __unused user_addr_t arg)
  	}
  }
  
@@ -393,7 +390,7 @@
  };
  
  /*
-@@ -360,7 +406,7 @@
+@@ -360,7 +406,7 @@ static struct mac_policy_conf sweet_sandbox_mac_conf = {
  static mac_policy_handle_t sweet_sandbox_mac_handle;
  
  static struct mac_policy_conf sweet_amfi_mac_conf = {
@@ -404,7 +401,7 @@
  };
 --- a/iokit/conf/files.arm64
 +++ b/iokit/conf/files.arm64
-@@ -15,6 +15,9 @@
+@@ -15,6 +15,9 @@ iokit/Kernel/arm/SweetKeyStore.cpp                               optional iokitc
  iokit/Kernel/arm/SweetWatchdog.cpp                               optional iokitcpp
  iokit/Kernel/arm/SweetSurface.cpp                                optional iokitcpp
  iokit/Kernel/arm/SweetFramebuffer.cpp                            optional iokitcpp
@@ -433,7 +430,7 @@
  static SECURITY_READ_ONLY_LATE(vm_map_t) io_submap;
 --- a/osfmk/console/serial_console.c
 +++ b/osfmk/console/serial_console.c
-@@ -283,6 +283,13 @@
+@@ -283,6 +283,13 @@ _cnputs(char *c, int size, bool poll)
  
  #if defined(ARM64_BOARD_CONFIG_SWEET)
  	sweet_log_append(c, size);
@@ -449,7 +446,7 @@
  	}
 --- a/osfmk/kern/printf.c
 +++ b/osfmk/kern/printf.c
-@@ -925,6 +925,17 @@
+@@ -925,6 +925,17 @@ consdebug_putc(char c)
  void
  consdebug_putc_unbuffered(char c)
  {
@@ -469,7 +466,7 @@
  	}
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
-@@ -124,6 +124,10 @@
+@@ -124,6 +124,10 @@ public:
  	uint8_t       fPending[SWEET_FB_SWAP_REC_SIZE];     /* latest swap, not yet shown */
  	bool          fDirty;
  	uint32_t      fPresentPeriodUS; /* copy cadence, independent of vsync */
@@ -480,19 +477,19 @@
  	bool          fPowerOff;      /* RequestPowerChange(0) */
  	uint32_t      fFadeStep;      /* fade-out steps done while off */
  
-@@ -158,6 +162,11 @@
- };
+@@ -159,6 +163,11 @@ public:
  
  OSDefineMetaClassAndStructors(IOMobileFramebufferUserClient, IOUserClient);
-+
+ 
 +/* The IOAcceleratorES stub (named "sgx") and its metal=1 property gate live in
 + * iokit/Kernel/MiniIOMobileFramebuffer.cpp; this publishes one for the SweetFramebuffer
 + * path, whose MiniIOMobileFramebufferStart is never called. */
 +extern "C" void MiniIOPublishAccelerator(IOService * provider);
- 
++
  bool
  AppleCLCD::start(IOService *provider)
-@@ -244,6 +253,10 @@
+ {
+@@ -244,6 +253,10 @@ AppleCLCD::start(IOService *provider)
  		OSSafeReleaseNULL(fVsync);
  		return false;
  	}
@@ -503,7 +500,7 @@
  	fVsync->setTimeoutUS(SWEET_FB_VSYNC_US);
  	fPresentTimer->setTimeoutUS(fPresentPeriodUS);
  	IOLog("SWEET PACE: independent vsync 60 Hz, panel-copy target %u Hz\n", hz);
-@@ -252,6 +265,7 @@
+@@ -252,6 +265,7 @@ AppleCLCD::start(IOService *provider)
  	setProperty("external", false);
  	setProperty("DisplayPipePlaneBaseAlignment", 64ULL, 32);
  	registerService();
@@ -511,7 +508,7 @@
  	IOLog("SWEET FB: AppleCLCD %ux%u stride %u at 0x%llx, default surface %u, presented as %ux%u\n",
  	    fWidth, fHeight, fRowBytes, fPhys, fSurface->id, fLogicalW, fLogicalH);
  	IOLog("SWEET FB: %s %ux%u content at %d,%d\n", fScale ? "scaling to" : "cropping at",
-@@ -263,9 +277,15 @@
+@@ -263,9 +277,15 @@ void
  AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
  {
  	AppleCLCD *fb = (AppleCLCD *)owner;
@@ -530,7 +527,7 @@
  	uint64_t now = mach_absolute_time();
  	uint64_t gap = fb->fLastVsync ? now - fb->fLastVsync : 0;
  	fb->fLastVsync = now;
-@@ -297,9 +317,14 @@
+@@ -297,9 +317,14 @@ void
  AppleCLCD::presentFired(OSObject *owner, IOTimerEventSource *sender)
  {
  	AppleCLCD *fb = (AppleCLCD *)owner;
@@ -548,12 +545,10 @@
  	IOLockLock(fb->fLock);
  	if (fb->fPowerOff) {
  		/* Fade out: halve every channel each vsync, then black, then idle. */
-@@ -441,6 +466,29 @@
- 			return;
- 		}
+@@ -443,6 +468,29 @@ sweet_fb_unknown_format(uint32_t format, uint32_t planes, uint32_t bpe)
  	}
-+}
-+
+ }
+ 
 +/* Destination-column -> source-column table for the scaled copy.  The x
 + * mapping only depends on the fixed panel geometry and the per-swap
 + * (dx, sx, w) triplet; the latter is constant for every real swap, so the
@@ -575,10 +570,12 @@
 +	sweet_scale_col_key[0] = dx;
 +	sweet_scale_col_key[1] = sx;
 +	sweet_scale_col_key[2] = w;
- }
- 
++}
++
  void
-@@ -611,6 +659,12 @@
+ AppleCLCD::present(const uint8_t *rec)
+ {
+@@ -611,6 +659,12 @@ AppleCLCD::present(const uint8_t *rec)
  			if (py1 > (int32_t)fHeight) {
  				py1 = (int32_t)fHeight;
  			}
@@ -591,7 +588,7 @@
  			uint64_t xstep = ((uint64_t)fLogicalW << 16) / fContentW;
  			for (int32_t y = py0; y < py1; y++) {
  				int32_t ly = (int32_t)(((int64_t)(y - fOffY) * fLogicalH) / fContentH);
-@@ -621,6 +675,14 @@
+@@ -621,6 +675,14 @@ AppleCLCD::present(const uint8_t *rec)
  				uint32_t *drow = (uint32_t *)(fPixels + (uint64_t)y * fRowBytes);
  				uint64_t xpos = (uint64_t)(px0 - fOffX) * xstep;
  				for (int32_t x = px0; x < px1; x++) {
@@ -606,7 +603,7 @@
  					int32_t lx = (int32_t)(xpos >> 16);
  					xpos += xstep;
  					if (lx < dx || lx >= dx + w) {
-@@ -648,24 +710,47 @@
+@@ -648,24 +710,47 @@ AppleCLCD::present(const uint8_t *rec)
  			if (py1 > (int32_t)fHeight) {
  				py1 = (int32_t)fHeight;
  			}
@@ -671,7 +668,7 @@
  		} else if (src != 0 && s->pixelFormat != SWEET_FB_FORMAT_BGRA) {
 --- a/bsd/dev/polaris_touch_i2c.c
 +++ b/bsd/dev/polaris_touch_i2c.c
-@@ -22,12 +22,14 @@
+@@ -22,12 +22,14 @@ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
  extern kern_return_t thread_terminate(thread_t);
  
  #define NORTH_PA       0x03900000u
@@ -686,7 +683,7 @@
  #define I2C_ADDR      0x20u
  #define CFG_MASK      0x3ffu
  #define IN_PULL_UP    (3u | (2u << 6))
-@@ -38,8 +40,8 @@
+@@ -38,8 +40,8 @@ extern kern_return_t thread_terminate(thread_t);
  
  static vm_offset_t pt_gpio;
  static vm_offset_t pt_reset_gpio;
@@ -696,7 +693,7 @@
  static bool pt_started;
  static bool pt_hid_enabled;
  static bool pt_reset_enabled;
-@@ -251,13 +253,13 @@
+@@ -251,13 +253,13 @@ out:
  	return ok;
  }
  
@@ -714,7 +711,7 @@
  }
  
  static void
-@@ -360,8 +362,9 @@
+@@ -360,8 +362,9 @@ pt_thread(void *arg __unused, wait_result_t result __unused)
  	uint8_t raw[MAX_FINGERS * FINGER_BYTES] = {0};
  	pt_gpio = ml_io_map(NORTH_PA, 0x23000);
  	pt_reset_gpio = ml_io_map(NORTH_PA + RESET_CFG, 0x1000);
@@ -726,7 +723,7 @@
  		goto done;
  	}
  	saved_sda_cfg = pt_rd(SDA);
-@@ -370,18 +373,25 @@
+@@ -370,18 +373,25 @@ pt_thread(void *arg __unused, wait_result_t result __unused)
  	saved_scl_io = pt_rd(SCL + IO_REG);
  	printf("POLARIS I2C: RESET99 before cfg=0x%x io=0x%x\n",
  	    pt_reset_rd(0), pt_reset_rd(IO_REG));
@@ -763,7 +760,7 @@
  		    pt_reset_rd(0), pt_reset_rd(IO_REG));
  		if (!(pt_reset_rd(IO_REG) & 1u)) {
  			printf("POLARIS I2C: RESET99 pad did not rise\n");
-@@ -463,6 +473,7 @@
+@@ -463,6 +473,7 @@ pt_thread(void *arg __unused, wait_result_t result __unused)
  		bool logged_bad_frame = false;
  		unsigned candidates[MAX_FINGERS] = {0};
  		int prior_x[MAX_FINGERS] = {0}, prior_y[MAX_FINGERS] = {0};
@@ -771,7 +768,7 @@
  		printf("POLARIS HID: experimental F12 base 0x%02x, %u slots, 8 bytes each\n",
  		    f12[3], pt_fingers);
  		for (;;) {
-@@ -470,6 +481,7 @@
+@@ -470,6 +481,7 @@ pt_thread(void *arg __unused, wait_result_t result __unused)
  			int x[MAX_FINGERS] = {0}, y[MAX_FINGERS] = {0};
  			bool read_ok = pt_read(f12[3], raw, pt_fingers * FINGER_BYTES);
  			unsigned bad_slot = MAX_FINGERS;
@@ -779,7 +776,7 @@
  			if (read_ok) {
  				for (unsigned slot = 0; slot < pt_fingers; ++slot) {
  					if (!pt_frame(raw + slot * FINGER_BYTES,
-@@ -499,6 +511,26 @@
+@@ -499,6 +511,26 @@ pt_thread(void *arg __unused, wait_result_t result __unused)
  				continue;
  			}
  			failures = 0;
@@ -806,6 +803,56 @@
  			for (unsigned slot = 0; slot < pt_fingers; ++slot) {
  				if (!present[slot]) {
  					if (pt_down[slot]) {
+--- a/osfmk/arm64/arm_vm_init.c
++++ b/osfmk/arm64/arm_vm_init.c
+@@ -367,6 +367,31 @@ SECURITY_READ_ONLY_LATE(static ptov_table_entry)        ptov_table[PTOV_TABLE_SI
+ SECURITY_READ_ONLY_LATE(static boolean_t)               kva_active = FALSE;
+ 
+ 
++/*
++ * POLARIS: who fed a PA outside the physmap to phystokv/phystokv_range? The panic's
++ * "caller" only reaches as far as this frame; print the LR chain unslid so the
++ * photo/ring names the offender (link address = printed value in the Mach-O).
++ */
++static void
++phystokv_bad_pa(const char * who, pmap_paddr_t pa)
++{
++	uintptr_t *fp = (uintptr_t *) __builtin_frame_address(0);
++
++	printf("%s: bad PA 0x%llx, slide %#lx, callers:", who, (unsigned long long) pa,
++	    (unsigned long) vm_kernel_slide);
++	for (int i = 0; i < 12 && fp != NULL && (((uintptr_t) fp) & 0xf) == 0; i++) {
++		uintptr_t lr = fp[1];
++		uintptr_t *next = (uintptr_t *) fp[0];
++
++		printf(" %#lx", (unsigned long) (lr >= vm_kernel_slide ? lr - vm_kernel_slide : lr));
++		if (next <= fp) {
++			break;
++		}
++		fp = next;
++	}
++	printf("\n");
++}
++
+ vm_map_address_t
+ phystokv(pmap_paddr_t pa)
+ {
+@@ -377,6 +402,7 @@ phystokv(pmap_paddr_t pa)
+ 		}
+ 	}
+ 	if (__improbable((pa < gPhysBase) || ((pa - gPhysBase) >= real_phys_size))) {
++		phystokv_bad_pa(__func__, pa);
+ 		panic("%s: illegal PA: 0x%llx; phys base 0x%llx, size 0x%llx", __func__,
+ 		    (unsigned long long)pa, (unsigned long long)gPhysBase, (unsigned long long)real_phys_size);
+ 	}
+@@ -402,6 +428,7 @@ phystokv_range(pmap_paddr_t pa, vm_size_t *max_len)
+ 		*max_len = len;
+ 	}
+ 	if (__improbable((pa < gPhysBase) || ((pa - gPhysBase) >= real_phys_size))) {
++		phystokv_bad_pa(__func__, pa);
+ 		panic("%s: illegal PA: 0x%llx; phys base 0x%llx, size 0x%llx", __func__,
+ 		    (unsigned long long)pa, (unsigned long long)gPhysBase, (unsigned long long)real_phys_size);
+ 	}
 diff --git a/bsd/dev/mi8_adreno.c b/bsd/dev/mi8_adreno.c
 new file mode 100644
 --- /dev/null
@@ -11103,7 +11150,7 @@ diff --git a/iokit/Kernel/RedwoodGPU.cpp b/iokit/Kernel/RedwoodGPU.cpp
 new file mode 100644
 --- /dev/null
 +++ b/iokit/Kernel/RedwoodGPU.cpp
-@@ -0,0 +1,1431 @@
+@@ -0,0 +1,1513 @@
 +/*
 + * RedwoodGPU: the phone's Adreno for programs to draw with.
 + *
@@ -11150,6 +11197,7 @@ new file mode 100644
 +#include <sys/systm.h>
 +
 +#include "MiniIOSurface.h"
++#include "arm/SweetSurface.h"
 +
 +extern "C" void redwood_tl(const char * format, ...) __printflike(1, 2);
 +
@@ -11569,6 +11617,7 @@ new file mode 100644
 +	IOMemoryDescriptor *            memory;         /* NULL: this handle is free */
 +	uint8_t *                       kernel;         /* where it is in the kernel */
 +	MiniIOSurface *                 surface;        /* whose memory it is, when not its own */
++	SweetSurface *                  sweet;          /* ... and the same for a SweetSurface */
 +	uint64_t                        address;        /* the GPU's for it */
 +	uint64_t                        size;
 +	uint32_t                        flags;
@@ -11588,6 +11637,7 @@ new file mode 100644
 +struct gpu_left {
 +	IOMemoryDescriptor *            memory;
 +	MiniIOSurface *                 surface;
++	SweetSurface *                  sweet;
 +	uint64_t                        address, size;
 +	uint32_t                        fence, flags;
 +};
@@ -11642,6 +11692,7 @@ new file mode 100644
 +	void reap(void);
 +	IOReturn gemNew(struct msm_gem_new * request);
 +	IOReturn surfaceBuffer(struct redwood_surface * request);
++	IOReturn sweetSurfaceBuffer(struct redwood_surface * request);
 +	IOReturn gemInfo(struct msm_gem_info * request);
 +	IOReturn submit(struct msm_gem_submit * request);
 +	IOReturn show(const struct redwood_show * request);
@@ -11696,6 +11747,7 @@ new file mode 100644
 +
 +		left->memory = b->memory;
 +		left->surface = b->surface;
++		left->sweet = b->sweet;
 +		left->address = b->address;
 +		left->size = b->size;
 +		left->fence = b->fence;
@@ -11712,7 +11764,8 @@ new file mode 100644
 +			if (said++ < 8) {
 +				IOLog("RedwoodGPU: the GPU is not done with what it was given: a buffer of %llu bytes stays its own\n", b->size);
 +			}
-+		} else if (b->surface == NULL && redwood_gpu_ready() && keep(b->memory, b->kernel, b->address, b->size, b->flags)) {
++		} else if (b->surface == NULL && b->sweet == NULL && redwood_gpu_ready() &&
++		    keep(b->memory, b->kernel, b->address, b->size, b->flags)) {
 +			b->memory = NULL;               /* (now the kept one's) */
 +		} else if (redwood_gpu_ready()) {
 +			redwood_gpu_unmap(b->address, b->size);
@@ -11724,9 +11777,13 @@ new file mode 100644
 +		if (b->surface != NULL) {
 +			MiniIOSurfaceDrop(b->surface);
 +		}
++		if (b->sweet != NULL) {
++			b->sweet->release();
++		}
 +	}
 +	b->memory = NULL;
 +	b->surface = NULL;
++	b->sweet = NULL;
 +	fBufferCount--;
 +	fBufferBytes -= b->size;
 +}
@@ -11742,7 +11799,7 @@ new file mode 100644
 +			i++;
 +			continue;
 +		}
-+		if (left->surface == NULL && redwood_gpu_ready() &&
++		if (left->surface == NULL && left->sweet == NULL && redwood_gpu_ready() &&
 +		    keep(left->memory, NULL, left->address, left->size, left->flags)) {
 +			left->memory = NULL;
 +		} else if (redwood_gpu_ready()) {
@@ -11754,6 +11811,9 @@ new file mode 100644
 +		}
 +		if (left->surface != NULL) {
 +			MiniIOSurfaceDrop(left->surface);
++		}
++		if (left->sweet != NULL) {
++			left->sweet->release();
 +		}
 +		*left = fLeft[--fLeftCount];
 +	}
@@ -11855,6 +11915,7 @@ new file mode 100644
 +	b->seen = false;
 +	b->fence = 0;
 +	b->surface = NULL;
++	b->sweet = NULL;
 +	fBufferCount++;
 +	fBufferBytes += size;
 +	return b;
@@ -12009,7 +12070,8 @@ new file mode 100644
 +	uint64_t size, began = mach_absolute_time();
 +
 +	if (s == NULL) {
-+		return kIOReturnNotFound;
++		/* POLARIS: IOSurfaces here are SweetSurfaces; the MiniIOSurface table is empty. */
++		return sweetSurfaceBuffer(request);
 +	}
 +	if (s->client != NULL) {
 +		/* (memory of a program's own with a surface made around it: not in whole pages, and seldom in rows the GPU takes) */
@@ -12059,6 +12121,67 @@ new file mode 100644
 +	if (b == NULL) {
 +		memory->release();
 +		MiniIOSurfaceDrop(s);
++		return kIOReturnNoMemory;
++	}
++	return kIOReturnSuccess;
++}
++
++/*
++ * POLARIS: the IOSurfaces this system makes are SweetSurfaces (SweetSurface.cpp); the
++ * MiniIOSurface table above is empty here, so surfaceBuffer() would never find one. A
++ * SweetSurface's pixels are the whole of its memory (its shared state is a separate
++ * descriptor), unlike a MiniIOSurface's, which live a page in. The surface is held for
++ * as long as the buffer is there, and described to the caller exactly as a Mini one is.
++ */
++IOReturn
++RedwoodGPUUserClient::sweetSurfaceBuffer(struct redwood_surface * request)
++{
++	SweetSurface * s = sweet_surface_copy(request->surface);
++	struct gpu_buffer * b = NULL;
++	uint64_t size, began = mach_absolute_time();
++
++	if (s == NULL) {
++		return kIOReturnNotFound;
++	}
++	size = round_page_64(s->allocSize);
++	if (size == 0 || size > GPU_BUFFER_MAX || s->memory == NULL) {
++		s->release();
++		return kIOReturnNoMemory;
++	}
++	request->size = size;
++	request->offset = s->offset;
++	request->rowBytes = s->bytesPerRow;
++	request->width = s->width;
++	request->height = s->height;
++	request->pixelFormat = s->pixelFormat;
++	request->planes = s->planeCount;
++	if (request->handle == kRedwoodDescribe) {
++		request->handle = 0;
++		s->release();
++		return kIOReturnSuccess;
++	}
++
++	IOLockLock(gGPULock);
++	for (uint32_t i = 0; i < GPU_BUFFERS; i++) {
++		if (fBuffers[i].memory != NULL && fBuffers[i].sweet == s) {
++			b = &fBuffers[i];
++			request->handle = i + 1;
++			break;
++		}
++	}
++	if (b != NULL) {
++		s->release();                   /* the buffer keeps its own reference */
++	} else if ((b = newBuffer(s->memory, 0, size, 0, &request->handle)) != NULL) {
++		s->memory->retain();                    /* freeBuffer() releases b->memory */
++		b->memory = s->memory;
++		b->kernel = (uint8_t *) s->kernelAddress();
++		b->sweet = s;
++		gGPUStat.surfaces++;
++	}
++	gGPUStat.taking += mach_absolute_time() - began;
++	IOLockUnlock(gGPULock);
++	if (b == NULL) {
++		s->release();
 +		return kIOReturnNoMemory;
 +	}
 +	return kIOReturnSuccess;
@@ -12213,10 +12336,16 @@ new file mode 100644
 +			}
 +			b->seed = seed;
 +			b->pushed = began;
-+		} else if (!b->seen || !gGPUCached) {
++		} else if (b->sweet == NULL && (!b->seen || !gGPUCached)) {
 +			continue;
 +		}
-+		redwood_gpu_to_memory(b->kernel, b->size);
++		/* POLARIS: a SweetSurface's seed is not shared with this file: its memory is pushed
++		 * out of the cache on every submission, as if it had changed every time. No kernel
++		 * address means a physical (device) descriptor: no VA flush is possible, and none is
++		 * needed -- a performOperation() on its physical address would panic in phystokv. */
++		if (b->kernel != NULL) {
++			redwood_gpu_to_memory(b->kernel, b->size);
++		}
 +		gGPUStat.flushed += b->size;
 +	}
 +	redwood_gpu_to_memory(NULL, 0);                 /* (and what was written last is in memory: a barrier) */
