@@ -1,4 +1,9 @@
-﻿## CURRENT 2026-11-08 ~17:40 SNAPSHOT R ready to push -- /redwood installer + 20H392-ported inject lib (Q CI 42464964411 re-running after transient KDK failure)
+﻿## CURRENT 2026-11-08 ~18:0x SNAPSHOT R pushed (polaris-ci `31f60e84`, local `c546599`) -- CI run 42466374285 building
+
+### Q CI failure cause + R fixes
+- Q rerun got past KDK and ~11 min into xnu build, then failed on MY code: `kern_exec.c:5587: error: cannot combine with previous 'int' declaration specifier` + `:5641: type specifier missing`. The inject block was inserted between `__attribute__((noinline)) static int` and `exec_extract_strings`, orphaning the `static int`. Fixed: noinline+static int moved back onto exec_extract_strings.
+- R also fixes (pre-emptive): `nameidone(&nd)` now runs BEFORE `vnode_put(dvp/vp)` in rw_mkdir (mkdir1at convention -- nameidone may need to release the dvp fs_nodelock); `#include <libkern/libkern.h>` added for strlcpy; patch regenerated 736415 B.
+- Earlier dxb patch-replay warnings (iobuffermemd_monterey, skywalk_sonoma, syntax_checker_sonoma, TrustCache files) are benign "already upstream, skipped" notices -- the rerun proved they do not block the build.
 
 ### ABI finding (blocks naive injection): polaris root = iOS 16.7.16/20H392, dipper donor = 16.5/20F66
 - inject.c's window-server hooks are hardcoded 20F66 unslid addresses; the 16.5 prebuilt libredwood.dylib would verify-fail (all replace_virtual bail safely, but nothing hooks). **Ported to 20H392**: `wifi-port/inject_polaris_20h392.c` (copied into WSL `/opt/polaris-dipper-userland/userland/src/inject_polaris.c`), 17 constant replacements from `device-private/dipper-graphics-abi-20H392.json`:
