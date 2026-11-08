@@ -336,6 +336,72 @@
  		imgp->ip_envc++;
  	}
  
+--- a/bsd/kern/sweet_amfi.c
++++ b/bsd/kern/sweet_amfi.c
+@@ -305,8 +305,54 @@
+ 	}
+ }
+ 
++/*
++ * dyld asks AMFI what it may do for the process it is starting (request 0x5a, "check dyld
++ * policy"): the argument is { flags in, pointer to flags out }. Everything is allowed --
++ * @paths, the DYLD_* variables, inserted libraries and interposing -- which is what lets
++ * our own library be loaded into stock daemons (kern.exec_inject DYLD_INSERT_LIBRARIES).
++ * Without a policy named "AMFI" answering this, dyld gets ENOPOLICY and silently prunes
++ * the inserted library from the environment.
++ */
++#define AMFI_SYSCALL_CHECK_DYLD_POLICY  0x5a
++#define AMFI_DYLD_OUTPUT_ALLOW_ALL      0xffULL
++
++/*
++ * Request 0x60, "query boot-arg state" (amfi_interface_query_bootarg_state() in libamfi): the
++ * argument points to 64 bits of flags, one for each boot-arg that switches a part of AMFI off
++ * (amfi_get_out_of_my_way and its kin). ExtensionKit asks, and unless one of the bits 0x86 is set
++ * it wants the signature of the system's table of extension points verified by AMFI's IOKit
++ * service, which does not exist here. Nothing is enforced by this kernel, so say so.
++ */
++#define AMFI_SYSCALL_QUERY_BOOTARG_STATE 0x60
++#define AMFI_BOOTARG_STATE_NOT_ENFORCING 0x86ULL
++
++static int
++sweet_amfi_policy_syscall(__unused struct proc *p, int call, user_addr_t arg)
++{
++	struct {
++		uint64_t input_flags;
++		user_addr_t output_flags;
++	} args;
++	uint64_t flags = AMFI_DYLD_OUTPUT_ALLOW_ALL;
++	uint64_t state = AMFI_BOOTARG_STATE_NOT_ENFORCING;
++	int error;
++
++	if (call == AMFI_SYSCALL_QUERY_BOOTARG_STATE) {
++		return copyout(&state, arg, sizeof(state));
++	}
++	if (call != AMFI_SYSCALL_CHECK_DYLD_POLICY) {
++		return ENOPOLICY;
++	}
++	error = copyin(arg, &args, sizeof(args));
++	if (error == 0) {
++		error = copyout(&flags, args.output_flags, sizeof(flags));
++	}
++	return error;
++}
++
+ static const struct mac_policy_ops sweet_amfi_mac_ops = {
+ 	.mpo_vnode_check_signature = sweet_amfi_vnode_check_signature,
++	.mpo_policy_syscall = sweet_amfi_policy_syscall,
+ };
+ 
+ /*
+@@ -360,7 +406,7 @@
+ static mac_policy_handle_t sweet_sandbox_mac_handle;
+ 
+ static struct mac_policy_conf sweet_amfi_mac_conf = {
+-	.mpc_name = "SWEET AMFI",
++	.mpc_name = "AMFI",
+ 	.mpc_fullname = "SWEET built-in Mobile File Integrity",
+ 	.mpc_ops = &sweet_amfi_mac_ops,
+ };
 --- a/iokit/conf/files.arm64
 +++ b/iokit/conf/files.arm64
 @@ -15,6 +15,9 @@
