@@ -1,4 +1,27 @@
-﻿## CURRENT 2026-11-08 ~18:4x ROOT CAUSE of silent injection found -- dyld needs MAC policy "AMFI" (S2 `bec5f673` building)
+﻿## CURRENT 2026-11-08 ~19:2x SNAPSHOT T pushed (`2ef4f962`, local `6cc439b`, CI 42477575729) -- phystokv bad-PA probe + SweetSurface bridge
+
+### Boot 089-S2 result (kernel S2, image shim-S2): injection WORKED, GL hooked, then PANIC
+- `exec_inject: backboardd DYLD_INSERT_LIBRARIES=/redwood/lib/libredwood.dylib` -- AMFI 0x5a answer fixed dyld policy; probe proves env delivered AND kept.
+- `IOK backboardd: matching1 RedwoodGPU -> Redwood`, `redwood-gl: 8 of 8 methods of EAGLContext are ours; OpenGL ES by Mesa, off-screen (OSMesa)`, `redwood: window server hooks installed`. Injection chain fully works; GL bridge is OSMesa (software) until surfaces reach the GPU.
+- **Panic**: `open RedwoodGPU type 8 -> 0x0` then `panic: phystokv_range: illegal PA: 0x112f0000; phys base 0xb0000000, size 0x14cc00000` (arm_vm_init.c). Double panic: panic text itself hit `Original panic string`.
+- `0x112f0000` facts: page-aligned, BELOW gPhysBase 0xb0000000 AND below SDM845 DRAM start ~0x80000000 => not managed DRAM, not the ABL FB (0x9d400000), not a GPU VA (VA allocator starts 0x20000000; step constants 0x010/0x011/0x012/0x100-0x109f). Nothing in the tree/payload contains it => computed at runtime.
+- Exhaustive audit done: all copypv/bcopy_phys/bzero_phys/ml_phys paths gate on pmap_valid_address (copy windows for invalid PA -- safe). prepare()/complete() on physical descs return immediately. The ONLY unconditional phystokv_range callers are the PA cache-flush functions via IOMemoryDescriptor::performOperation (writeBytes-NULL tail, IODMACommand, MiniIO flip buffers -- none obviously reachable with PA 0x112f0000).
+- Still-consistent suspects: a GPU VA treated as PA inside a flush path, or a physical-descriptor performOperation whose PA is runtime-computed.
+
+### Snapshot T content
+1. `osfmk/arm64/arm_vm_init.c` (NEW to patch modified list): `phystokv_bad_pa()` -- before the illegal-PA panic, prints PA + vm_kernel_slide + up to 12 LR values UNSLID (walk fp chain via __builtin_frame_address). Next panic photo gives the caller symbol table directly.
+2. `iokit/Kernel/RedwoodGPU.cpp`: `sweetSurfaceBuffer()` -- surfaceBuffer() falls back to `sweet_surface_copy()` when MiniIOSurfaceCopy misses (Mini table is empty on polaris; ALL real IOSurfaces are Sweet). Sweet pixels = whole `s->memory` (no +PAGE_SIZE offset; state is a separate desc). `gpu_buffer`/`gpu_left` gain `SweetSurface *sweet`; freeBuffer/reap release it; keep() skip when sweet!=NULL; submit() flushes sweet buffers every submit (no shared seed) and NEVER calls performOperation on a NULL-kernel (physical) descriptor.
+3. Patch generator: `arm_vm_init.c` added to modified list; regenerated 744,920 B (this time PowerShell -- WSL broken this session).
+- NOTE: python/py not on Windows PATH this session; WSL relay dead (CreateProcessCommon execvpe). Patch regen + GitHub API push were done in PowerShell (git credential fill + Invoke-RestMethod with proxy 127.0.0.1:7890). ci_watch.py/push_snapshot.py need WSL.
+
+### Next
+- CI 42477575729 -> kernel T -> pack `-InputOn -Redwood -Step -1` image -> boot -> expect either (a) panic with `bad PA 0x112f0000 ... callers:` line (symbolize vs kernel-T) or (b) submissions reaching real GPU via sweet surfaces.
+- After caller identified: fix properly (no panic suppression), then re-verify GL draws on real surfaces -> accelerated renderer line.
+- Deferred still: bluetoothd/fairplayd crash loops, rb auto-reset via SPMI, Wi-Fi/BT/wallpaper.
+
+## ARCHIVE SNAPSHOT S2 pushed (`bec5f673`) -- CI 42470583394 BUILD OK, tested boot 089-S2 above
+
+## ARCHIVE 2026-11-08 ~18:4x ROOT CAUSE of silent injection found -- dyld needs MAC policy "AMFI" (S2 `bec5f673` building)
 
 ### Boot 089 result (kernel R `7c2f3a8b`, image shim-R, gpu=1+Redwood+InputOn)
 - Kernel side ALL WORKED: `RedwoodGPU: service registered; GPU is kept for user space`; 4 blobs installed+verified (`POLARIS REDWOOD: installed ...` x4, `4 written, 1 absent`=libredwood-sb); `exec_inject seeded: /redwood/lib/libredwood.dylib backboardd` BEFORE launchd.
