@@ -2525,7 +2525,7 @@ new file mode 100644
 +	{ "GMU_HFI_QTBL_INFO", 0x5184, 0x1, 0 },
 +	{ "GMU_AHB_FENCE_RANGE_0", 0x9311, 0x802800a0, 0 },
 +	{ "GMU_CM3_CFG", 0x502d, 0x4052, 0 },
-+	{ "GMU_HFI_SFR_ADDR", 0x5182, 0x6030100, 0 },
++	{ "GMU_HFI_SFR_ADDR", 0x5182, 0x6030200, 0 }, /* sdm845.dtsi adreno-630.2: the GMU firmware wants 0x06030200 (fajita 11-13); the vendor DTB's 0x06030001 leaves the PLL unprogrammed */
 +	{ "GPU_GMU_CX_GMU_PWR_COL_CP_MSG", 0x5100, 0x60005003, 0 },
 +	{ "GMU_SYS_BUS_CONFIG", 0x4c0f, 0x1, 0 },
 +	{ "GMU_ICACHE_CONFIG", 0x4c00, 0x1, 0 },
